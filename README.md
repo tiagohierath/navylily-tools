@@ -13,6 +13,9 @@ Designed for a declarative/ephemeral NixOS machine: nothing is installed
 system-wide. The scripts fetch their dependencies (`ffmpeg`, Python + Google
 client libs) into an ephemeral `nix shell` on demand.
 
+> **Practical, command-first docs** (every knob you can edit, every command you
+> can run) live in [`DOCS/`](DOCS/README.md).
+
 > A leaked `LD_LIBRARY_PATH` can break nix-provided binaries with
 > `GLIBC_ABI_DT_X86_64_PLT` errors. Both scripts strip it before invoking nix.
 

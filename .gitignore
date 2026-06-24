@@ -1,0 +1,25 @@
+# Secrets — never commit
+client_secret*.json
+token*.json
+*.pem
+*.key
+
+# Local state
+state.json
+*.lock
+
+# Media — do not commit inputs/outputs
+videos/audio/
+videos/images/
+videos/output/
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.mp3
+*.m4a
+*.flac
+
+# Python
+__pycache__/
+*.pyc

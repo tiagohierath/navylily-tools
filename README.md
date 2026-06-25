@@ -1,11 +1,14 @@
 # navylily-tools
 
-Two small tools for the [navylily.tv](https://navylily.tv) workflow:
+Small tools for the [navylily.tv](https://navylily.tv) workflow:
 
-1. **`make_videos.sh`** — turn audio + a folder of images into high-quality,
+1. **`audio-clean.sh`** — clean a raw mic recording (RNNoise denoise + EQ +
+   compression + loudness) into a consistent, broadcast-ish voice file. Tuned
+   for a FIFINE USB mic.
+2. **`make_videos.sh`** — turn audio + a folder of images into high-quality,
    YouTube-ready 4:3 1080p videos with a subtle, smooth 60fps zoom and a
    condensed-serif watermark.
-2. **`youtube_upload.py`** (+ `youtube_upload.sh`) — upload **one** video per
+3. **`youtube_upload.py`** (+ `youtube_upload.sh`) — upload **one** video per
    day to YouTube as a **private** video, built so it is *physically incapable*
    of over-posting.
 

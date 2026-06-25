@@ -255,13 +255,20 @@ make_image_clip() {
         zexpr="(1.0+${amount})-(on/${frames})*${amount}"
     fi
 
-    # Supersample by SUPERSAMPLE so the zoom crop always has real pixels to work
-    # with, keep it centered, then output at exact target size and FPS.
+    # Fill the 4:3 frame with NO distortion and NO black bars/columns, whatever
+    # the source shape:
+    #   - scale ...:force_original_aspect_ratio=increase  -> cover the frame,
+    #     keeping the image's aspect ratio (so it's never stretched);
+    #   - crop ...                                         -> trim the overflow
+    #     (so there are never letterbox/pillarbox bars);
+    #   - setsar=1                                         -> square pixels, so a
+    #     non-square source SAR can't make it look stretched on playback.
+    # SUPERSAMPLE just gives the zoom crop spare real pixels to work with.
     local ss_w ss_h
     ss_w=$(awk -v w="$WIDTH" -v f="$SUPERSAMPLE" 'BEGIN{printf "%d", w*f}')
     ss_h=$(awk -v h="$HEIGHT" -v f="$SUPERSAMPLE" 'BEGIN{printf "%d", h*f}')
     ffmpeg -y -loop 1 -i "$img" -t "$duration" \
-        -vf "scale=${ss_w}:${ss_h}:force_original_aspect_ratio=increase,crop=${ss_w}:${ss_h},zoompan=z='${zexpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${WIDTH}x${HEIGHT}:fps=${FPS},format=yuv444p" \
+        -vf "scale=${ss_w}:${ss_h}:force_original_aspect_ratio=increase,setsar=1,crop=${ss_w}:${ss_h},zoompan=z='${zexpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${WIDTH}x${HEIGHT}:fps=${FPS},format=yuv444p" \
         -c:v libx264 -qp 0 -preset ultrafast -an "$out" >/dev/null 2>&1
 }
 

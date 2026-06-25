@@ -21,8 +21,14 @@ subtle 60fps zoom and a serif watermark. Output lands in
    distortion) and never letterboxed/pillarboxed (no black bars), whatever the
    source photo's shape. Square pixels are forced (`setsar=1`) so odd camera
    metadata can't stretch it either.
-4. Normalizes + lightly compresses the audio for YouTube (two-pass EBU R128,
-   target ≈ −14 LUFS) — this is where the quality effort goes.
+4. **Cleans + normalizes the audio** (this is where the quality effort goes):
+   with `AUDIO_CLEAN=1` (default) it runs the **same voice cleanup as
+   `audio-clean.sh`** — RNNoise denoise + de-box/presence EQ + compression
+   (shared from `lib/voice-chain.sh`) — then a two-pass EBU R128 loudnorm to
+   ≈ −14 LUFS for YouTube. One compression, one loudnorm: no double processing.
+   So you can drop **raw mic recordings** straight into `videos/audio/`. Cleaning
+   needs the `arnndn` filter, so the script switches to nix's ffmpeg if the local
+   one lacks it. Set `AUDIO_CLEAN=0` to skip cleaning (faster, no RNNoise).
 5. The watermark ("Aulas completas em navylily.tv", Cormorant serif) covers the
    first 30s only — baked into the clips in step 3, not a separate pass.
 6. **Muxes**: concatenates the clips with `-c copy` (video **never re-encoded**)

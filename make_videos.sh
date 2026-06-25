@@ -19,8 +19,10 @@
 #
 # The heavy lifting goes into AUDIO (two-pass EBU R128 + compression). VIDEO is
 # tuned for speed at the same visual quality: 1080p only (never 4k), a light
-# 1.5x oversample for the zoom, lossless intermediate clips, and a single
-# crf 17 / preset fast final pass with +faststart for streaming.
+# 1.25x oversample for the zoom, and each frame encoded exactly ONCE (crf 17,
+# preset fast). Per-image clips are rendered straight to final quality with the
+# watermark baked in, then concatenated with -c copy and the audio muxed on top
+# (+faststart for streaming) — so nothing is ever re-encoded.
 #
 # ── How to run on NixOS ──────────────────────────────────────────────────────
 #   The script needs ffmpeg + ffprobe. It does NOT install anything system-wide
@@ -55,10 +57,10 @@ WIDTH=1440          # 4:3 at 1080p height (always 1080p, never 4k)
 HEIGHT=1080
 FPS=60              # smooth motion for the subtle zoom
 
-# Oversample factor for the zoom. The zoom is tiny (<=6%), so 1.5x already gives
+# Oversample factor for the zoom. The zoom is tiny (<=6%), so even 1.25x leaves
 # the crop plenty of real pixels with zero upscaling — and it keeps processing
-# near 1080p instead of ballooning to 4k, which is most of the speed win.
-SUPERSAMPLE=1.5
+# near 1080p instead of ballooning to 4k.
+SUPERSAMPLE=1.25
 
 # Image on-screen durations (still random per image). The first FAST_COUNT
 # images flash by to open with energy; everything after settles into a calmer
@@ -235,12 +237,16 @@ get_audio_duration() {
 # ---------------------------------------------------------------------------
 # Per-image clip with a subtle, smooth zoom (random direction).
 #
-# Lossless intermediate (x264 -qp 0) so concatenation + the single final encode
-# don't stack generation loss. zoompan runs at FPS with a per-output-frame
-# linear z so the motion is perfectly smooth rather than stepped.
+# Encoded ONCE, straight to the final delivery settings (crf 17, yuv420p,
+# High@4.2) with its slice of the watermark baked in. The clips are then
+# concatenated with -c copy and the audio muxed on top, so no frame is ever
+# re-encoded. zoompan runs at FPS with a per-output-frame linear z, so the
+# motion is perfectly smooth rather than stepped.
+#
+# Args: <image> <duration_s> <timeline_offset_s> <out.mp4>
 # ---------------------------------------------------------------------------
 make_image_clip() {
-    local img="$1" duration="$2" out="$3"
+    local img="$1" duration="$2" offset="$3" out="$4"
     local frames amount zexpr
     frames=$(awk -v d="$duration" -v f="$FPS" 'BEGIN{printf "%d", d*f}')
     (( frames < 2 )) && frames=2
@@ -253,6 +259,22 @@ make_image_clip() {
     else
         # zoom out: 1+amount -> 1.0, linear over the clip
         zexpr="(1.0+${amount})-(on/${frames})*${amount}"
+    fi
+
+    # Watermark: bake it onto the part of THIS clip that lands within the first
+    # WATERMARK_SECONDS of the whole video. offset = this clip's start time, and
+    # t is the clip-local time, so the cutoff is (WATERMARK_SECONDS - offset).
+    local dt=""
+    if [[ -n "$FONTFILE" ]]; then
+        local wleft
+        wleft=$(awk -v w="$WATERMARK_SECONDS" -v o="$offset" 'BEGIN{printf "%.4f", w-o}')
+        if (( $(awk -v x="$wleft" 'BEGIN{print (x>0)}') )); then
+            local enable=""
+            if (( $(awk -v x="$wleft" -v d="$duration" 'BEGIN{print (x<d)}') )); then
+                enable=":enable='lt(t,${wleft})'"   # watermark stops mid-clip
+            fi
+            dt=",drawtext=fontfile='${FONTFILE}':text='${WATERMARK_TEXT}':fontcolor=black:fontsize=44:box=1:boxcolor=white@0.5:boxborderw=14:x=36:y=h-th-36${enable}"
+        fi
     fi
 
     # Fill the 4:3 frame with NO distortion and NO black bars/columns, whatever
@@ -268,8 +290,8 @@ make_image_clip() {
     ss_w=$(awk -v w="$WIDTH" -v f="$SUPERSAMPLE" 'BEGIN{printf "%d", w*f}')
     ss_h=$(awk -v h="$HEIGHT" -v f="$SUPERSAMPLE" 'BEGIN{printf "%d", h*f}')
     ffmpeg -y -loop 1 -i "$img" -t "$duration" \
-        -vf "scale=${ss_w}:${ss_h}:force_original_aspect_ratio=increase,setsar=1,crop=${ss_w}:${ss_h},zoompan=z='${zexpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${WIDTH}x${HEIGHT}:fps=${FPS},format=yuv444p" \
-        -c:v libx264 -qp 0 -preset ultrafast -an "$out" >/dev/null 2>&1
+        -vf "scale=${ss_w}:${ss_h}:force_original_aspect_ratio=increase,setsar=1,crop=${ss_w}:${ss_h},zoompan=z='${zexpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${WIDTH}x${HEIGHT}:fps=${FPS}${dt},format=yuv420p" \
+        -c:v libx264 -preset fast -crf 17 -pix_fmt yuv420p -profile:v high -level 4.2 -an "$out" >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -333,38 +355,29 @@ for audio in "${audio_files[@]}"; do
     concat_list="$run_dir/concat.txt"
     : > "$concat_list"
 
+    offset=0
     for i in "${!seq[@]}"; do
         idx="${seq[$i]}"; dur="${durs[$i]}"; img="${image_files[$idx]}"
         clip="$run_dir/clip_$(printf '%04d' "$i").mp4"
         echo "  [$i] $(basename "$img") for ${dur}s"
-        make_image_clip "$img" "$dur" "$clip"
+        make_image_clip "$img" "$dur" "$offset" "$clip"
         echo "file '$clip'" >> "$concat_list"
+        offset=$(awk -v o="$offset" -v d="$dur" 'BEGIN{printf "%.4f", o+d}')
     done
 
-    silent_video="$run_dir/silent.mp4"
-    ffmpeg -y -f concat -safe 0 -i "$concat_list" -c copy "$silent_video" >/dev/null 2>&1
-
-    # Normalize + compress audio for YouTube.
+    # Normalize + compress audio for YouTube — this is where the effort goes.
     norm_audio="$run_dir/audio_norm.wav"
     normalize_audio "$audio" "$norm_audio"
 
-    # Watermark: condensed serif, black text on a translucent white box,
-    # bottom-left, first WATERMARK_SECONDS only.
-    if [[ -n "$FONTFILE" ]]; then
-        drawtext_filter="drawtext=fontfile='${FONTFILE}':text='${WATERMARK_TEXT}':fontcolor=black:fontsize=44:box=1:boxcolor=white@0.5:boxborderw=14:x=36:y=h-th-36:enable='lt(t,${WATERMARK_SECONDS})'"
-        vf_args=(-vf "$drawtext_filter")
-    else
-        vf_args=()
-    fi
-
-    echo "  final encode (fast video, same crf 17 quality)..."
+    # Mux: the clips are already final-quality H.264 with the watermark baked in,
+    # so the VIDEO IS COPIED (never re-encoded) and only the audio is encoded.
+    # Each frame is therefore encoded exactly once — the main speed win.
+    echo "  muxing (video copied, audio encoded)..."
     tmp_out="$run_dir/final.mp4"
-    ffmpeg -y -i "$silent_video" -i "$norm_audio" \
-        "${vf_args[@]}" \
-        -c:v libx264 -preset fast -crf 17 -pix_fmt yuv420p \
-        -profile:v high -level 4.2 -movflags +faststart \
-        -c:a aac -b:a 320k \
-        -shortest \
+    ffmpeg -y -f concat -safe 0 -i "$concat_list" -i "$norm_audio" \
+        -map 0:v:0 -map 1:a:0 \
+        -c:v copy -c:a aac -b:a 320k \
+        -movflags +faststart -shortest \
         "$tmp_out" >/dev/null 2>&1
 
     # Atomic publish so an interrupted run never leaves a half-written .mp4

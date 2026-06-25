@@ -13,18 +13,21 @@ subtle 60fps zoom and a serif watermark. Output lands in
 2. Builds a shuffled image sequence long enough to cover the audio, never
    repeating back-to-back. The **first 10 images flash by (random 1–3s)** to
    open with energy; **everything after is calmer (random 3–5s)**.
-3. Renders each image as a lossless clip with a **very subtle** zoom — random
-   in or out, 3–6% over the clip, perfectly smooth at 60fps (1.5× oversample,
-   enough for the tiny zoom, no 4k blow-up). Every image **fills the 4:3 frame
-   by cover-cropping** — never stretched (no distortion) and never letterboxed/
-   pillarboxed (no black bars), whatever the source photo's shape. Square pixels
-   are forced (`setsar=1`) so odd camera metadata can't stretch it either.
+3. Renders each image as a final-quality clip (`crf 17`, `preset fast`,
+   yuv420p, High@4.2) with a **very subtle** zoom — random in or out, 3–6% over
+   the clip, perfectly smooth at 60fps (1.25× oversample, enough for the tiny
+   zoom, no 4k blow-up), and the watermark already baked in where it applies.
+   Every image **fills the 4:3 frame by cover-cropping** — never stretched (no
+   distortion) and never letterboxed/pillarboxed (no black bars), whatever the
+   source photo's shape. Square pixels are forced (`setsar=1`) so odd camera
+   metadata can't stretch it either.
 4. Normalizes + lightly compresses the audio for YouTube (two-pass EBU R128,
    target ≈ −14 LUFS) — this is where the quality effort goes.
-5. Burns a watermark ("Aulas completas em navylily.tv", Cormorant serif) onto
-   the first 30s only.
-6. Single H.264 encode at `crf 17` (full quality), `preset fast` (much quicker
-   than `veryslow`), `+faststart`.
+5. The watermark ("Aulas completas em navylily.tv", Cormorant serif) covers the
+   first 30s only — baked into the clips in step 3, not a separate pass.
+6. **Muxes**: concatenates the clips with `-c copy` (video **never re-encoded**)
+   and encodes only the audio (AAC 320k), `+faststart`. So **each frame is
+   encoded exactly once** — the main speed win over the old double-encode.
 7. **Skips** any audio whose `.mp4` already exists, and writes atomically — an
    interrupted run never leaves a half file that looks finished.
 
@@ -55,7 +58,7 @@ one is `make_videos.sh` in this repo.
 |------|----------|---------|-----------------|
 | `WIDTH` / `HEIGHT` | `1440` / `1080` | output resolution (1080p, 4:3). For 16:9 use `1920`/`1080`. |
 | `FPS` | `60` | frame rate of the zoom motion. |
-| `SUPERSAMPLE` | `1.5` | zoom oversample. Higher = sharper zoom but slower; `1.5` is plenty for a ≤6% zoom. Raising it is what would push processing toward 4k. |
+| `SUPERSAMPLE` | `1.25` | zoom oversample. Higher = sharper zoom but slower; `1.25` is plenty for a ≤6% zoom. Raising it is what would push processing toward 4k. |
 | `FAST_COUNT` | `10` | how many opening images use the quick pace. |
 | `FAST_MIN_SECONDS` / `FAST_MAX_SECONDS` | `1` / `3` | duration range for the first `FAST_COUNT` images. |
 | `REST_MIN_SECONDS` / `REST_MAX_SECONDS` | `3` / `5` | duration range for every image after that. |
@@ -69,10 +72,14 @@ one is `make_videos.sh` in this repo.
 
 Deeper edits, by section:
 
-- **Speed vs. quality** — the last `ffmpeg` call (`-crf 17 -preset fast`). `crf`
-  controls quality (lower = better/bigger); `preset` only trades encode speed
-  for file size at the *same* quality. It's `fast` for quick renders; use
-  `medium`/`slow` for smaller files, `veryfast` for max speed.
+- **Speed vs. quality** — the per-clip encode in `make_image_clip()`
+  (`-crf 17 -preset fast`). `crf` controls quality (lower = better/bigger);
+  `preset` only trades encode speed for file size at the *same* quality. Use
+  `medium`/`slow` for smaller files, `veryfast` for max speed. The final mux
+  copies the video (no second encode), so this is the only video encode.
+- **Want it faster still?** Drop `FPS` to `30` — a subtle slow zoom looks
+  identical and it ~halves render time (the single biggest lever). Lowering
+  `SUPERSAMPLE` and `preset veryfast` help a little more.
 - **Audio compression** — the `acompressor=threshold=-18dB:ratio=3:...` filter
   inside `normalize_audio()`. Soften the ratio for less squashing.
 - **Watermark style** — the `drawtext=...` filter (`fontsize=44`,

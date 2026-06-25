@@ -15,7 +15,10 @@ subtle 60fps zoom and a serif watermark. Output lands in
    open with energy; **everything after is calmer (random 3–5s)**.
 3. Renders each image as a lossless clip with a **very subtle** zoom — random
    in or out, 3–6% over the clip, perfectly smooth at 60fps (1.5× oversample,
-   enough for the tiny zoom, no 4k blow-up).
+   enough for the tiny zoom, no 4k blow-up). Every image **fills the 4:3 frame
+   by cover-cropping** — never stretched (no distortion) and never letterboxed/
+   pillarboxed (no black bars), whatever the source photo's shape. Square pixels
+   are forced (`setsar=1`) so odd camera metadata can't stretch it either.
 4. Normalizes + lightly compresses the audio for YouTube (two-pass EBU R128,
    target ≈ −14 LUFS) — this is where the quality effort goes.
 5. Burns a watermark ("Aulas completas em navylily.tv", Cormorant serif) onto
@@ -76,6 +79,9 @@ Deeper edits, by section:
   `boxcolor=white@0.5`, position `x=36:y=h-th-36`).
 - **Zoom math** — `make_image_clip()` builds the `zexpr` (linear in/out). The
   `RANDOM % 2` picks the direction per image.
+- **Framing** — also in `make_image_clip()`: `scale=...:force_original_aspect_ratio=increase`
+  + `crop` = fill-and-crop (no stretch, no bars), and `setsar=1` forces square
+  pixels. Don't switch `increase`→`decrease` unless you *want* black bars.
 
 ## Inputs / outputs
 

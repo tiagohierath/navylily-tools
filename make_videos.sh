@@ -59,14 +59,14 @@ WIDTH=1440          # 4:3 at 1080p height (always 1080p, never 4k)
 HEIGHT=1080
 FPS=60              # output frame rate (frames are static — no motion)
 
-# Image on-screen durations (still random per image). The first FAST_COUNT
-# images flash by to open with energy; everything after settles into a calmer
-# pace. Both ranges are randomized per image.
-FAST_COUNT=10
+# Image on-screen durations (still random per image). For roughly the first
+# FAST_PHASE_SECONDS of the video the images flash by to open with energy; after
+# that the pace settles right down. Both ranges are randomized per image.
+FAST_PHASE_SECONDS=30
 FAST_MIN_SECONDS=1
 FAST_MAX_SECONDS=3
-REST_MIN_SECONDS=3
-REST_MAX_SECONDS=5
+REST_MIN_SECONDS=10
+REST_MAX_SECONDS=20
 
 # YouTube loudness target (EBU R128). YouTube normalizes to roughly -14 LUFS.
 LOUDNORM_I=-14
@@ -248,15 +248,16 @@ shuffle_sequence() {
 build_sequence() {
     local needed_seconds="$1" seq_file="$2" dur_file="$3"
     local n_images=${#image_files[@]}
-    local total=0 last_idx=-1 count=0
+    local total=0 last_idx=-1
     : > "$seq_file"; : > "$dur_file"
 
     while (( $(awk -v t="$total" -v need="$needed_seconds" 'BEGIN{print (t < need)}') )); do
         mapfile -t shuffled < <(shuffle_sequence "$n_images")
         for pick in "${shuffled[@]}"; do
             if [[ "$pick" == "$last_idx" && $n_images -gt 1 ]]; then continue; fi
-            # First FAST_COUNT images are quick (1-3s); the rest are calmer (3-5s).
-            if (( count < FAST_COUNT )); then
+            # Images that START within the first FAST_PHASE_SECONDS flash by
+            # (1-3s); everything after settles into a slow pace (10-20s).
+            if (( $(awk -v t="$total" -v f="$FAST_PHASE_SECONDS" 'BEGIN{print (t < f)}') )); then
                 dur="$(random_float "$FAST_MIN_SECONDS" "$FAST_MAX_SECONDS")"
             else
                 dur="$(random_float "$REST_MIN_SECONDS" "$REST_MAX_SECONDS")"
@@ -265,7 +266,6 @@ build_sequence() {
             echo "$dur" >> "$dur_file"
             total="$(awk -v t="$total" -v d="$dur" 'BEGIN{printf "%.4f", t+d}')"
             last_idx="$pick"
-            count=$((count + 1))
             if (( $(awk -v t="$total" -v need="$needed_seconds" 'BEGIN{print (t >= need)}') )); then break; fi
         done
     done

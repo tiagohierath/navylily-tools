@@ -17,9 +17,10 @@
 #   videos/output/   -> generated videos land here
 #   videos/fonts/    -> bundled Cormorant.ttf (condensed serif watermark)
 #
-# Quality is favoured over speed everywhere: lossless intermediate clips, a
-# single final x264 pass at a high quality (crf 17, preset veryslow), 4:4:4 ->
-# 4:2:0 only at the very end, and +faststart for streaming.
+# The heavy lifting goes into AUDIO (two-pass EBU R128 + compression). VIDEO is
+# tuned for speed at the same visual quality: 1080p only (never 4k), a light
+# 1.5x oversample for the zoom, lossless intermediate clips, and a single
+# crf 17 / preset fast final pass with +faststart for streaming.
 #
 # ── How to run on NixOS ──────────────────────────────────────────────────────
 #   The script needs ffmpeg + ffprobe. It does NOT install anything system-wide
@@ -50,12 +51,23 @@ OUTPUT_DIR="$BASE_DIR/output"
 FONTS_DIR="$BASE_DIR/fonts"
 WORK_DIR="$(mktemp -d)"
 
-WIDTH=1440          # 4:3 at 1080p height
+WIDTH=1440          # 4:3 at 1080p height (always 1080p, never 4k)
 HEIGHT=1080
 FPS=60              # smooth motion for the subtle zoom
 
-MIN_IMG_SECONDS=6
-MAX_IMG_SECONDS=11
+# Oversample factor for the zoom. The zoom is tiny (<=6%), so 1.5x already gives
+# the crop plenty of real pixels with zero upscaling — and it keeps processing
+# near 1080p instead of ballooning to 4k, which is most of the speed win.
+SUPERSAMPLE=1.5
+
+# Image on-screen durations (still random per image). The first FAST_COUNT
+# images flash by to open with energy; everything after settles into a calmer
+# pace. Both ranges are randomized per image.
+FAST_COUNT=10
+FAST_MIN_SECONDS=1
+FAST_MAX_SECONDS=3
+REST_MIN_SECONDS=3
+REST_MAX_SECONDS=5
 
 # Subtle zoom: each image drifts by a random amount in this range, and the
 # direction (in or out) is chosen at random per image. Keep these small — the
@@ -193,18 +205,24 @@ shuffle_sequence() {
 build_sequence() {
     local needed_seconds="$1" seq_file="$2" dur_file="$3"
     local n_images=${#image_files[@]}
-    local total=0 last_idx=-1
+    local total=0 last_idx=-1 count=0
     : > "$seq_file"; : > "$dur_file"
 
     while (( $(awk -v t="$total" -v need="$needed_seconds" 'BEGIN{print (t < need)}') )); do
         mapfile -t shuffled < <(shuffle_sequence "$n_images")
         for pick in "${shuffled[@]}"; do
             if [[ "$pick" == "$last_idx" && $n_images -gt 1 ]]; then continue; fi
-            dur="$(random_float "$MIN_IMG_SECONDS" "$MAX_IMG_SECONDS")"
+            # First FAST_COUNT images are quick (1-3s); the rest are calmer (3-5s).
+            if (( count < FAST_COUNT )); then
+                dur="$(random_float "$FAST_MIN_SECONDS" "$FAST_MAX_SECONDS")"
+            else
+                dur="$(random_float "$REST_MIN_SECONDS" "$REST_MAX_SECONDS")"
+            fi
             echo "$pick" >> "$seq_file"
             echo "$dur" >> "$dur_file"
             total="$(awk -v t="$total" -v d="$dur" 'BEGIN{printf "%.4f", t+d}')"
             last_idx="$pick"
+            count=$((count + 1))
             if (( $(awk -v t="$total" -v need="$needed_seconds" 'BEGIN{print (t >= need)}') )); then break; fi
         done
     done
@@ -237,11 +255,14 @@ make_image_clip() {
         zexpr="(1.0+${amount})-(on/${frames})*${amount}"
     fi
 
-    # Supersample to 2x so the zoom crop always has real pixels to work with,
-    # keep it centered, then output at exact target size and FPS.
+    # Supersample by SUPERSAMPLE so the zoom crop always has real pixels to work
+    # with, keep it centered, then output at exact target size and FPS.
+    local ss_w ss_h
+    ss_w=$(awk -v w="$WIDTH" -v f="$SUPERSAMPLE" 'BEGIN{printf "%d", w*f}')
+    ss_h=$(awk -v h="$HEIGHT" -v f="$SUPERSAMPLE" 'BEGIN{printf "%d", h*f}')
     ffmpeg -y -loop 1 -i "$img" -t "$duration" \
-        -vf "scale=${WIDTH}*2:${HEIGHT}*2:force_original_aspect_ratio=increase,crop=${WIDTH}*2:${HEIGHT}*2,zoompan=z='${zexpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${WIDTH}x${HEIGHT}:fps=${FPS},format=yuv444p" \
-        -c:v libx264 -qp 0 -preset veryfast -an "$out" >/dev/null 2>&1
+        -vf "scale=${ss_w}:${ss_h}:force_original_aspect_ratio=increase,crop=${ss_w}:${ss_h},zoompan=z='${zexpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${WIDTH}x${HEIGHT}:fps=${FPS},format=yuv444p" \
+        -c:v libx264 -qp 0 -preset ultrafast -an "$out" >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -329,11 +350,11 @@ for audio in "${audio_files[@]}"; do
         vf_args=()
     fi
 
-    echo "  final encode (quality-first, single pass)..."
+    echo "  final encode (fast video, same crf 17 quality)..."
     tmp_out="$run_dir/final.mp4"
     ffmpeg -y -i "$silent_video" -i "$norm_audio" \
         "${vf_args[@]}" \
-        -c:v libx264 -preset veryslow -crf 17 -pix_fmt yuv420p \
+        -c:v libx264 -preset fast -crf 17 -pix_fmt yuv420p \
         -profile:v high -level 4.2 -movflags +faststart \
         -c:a aac -b:a 320k \
         -shortest \

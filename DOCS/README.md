@@ -6,6 +6,7 @@ source**.
 
 | Tool | File | Doc |
 |------|------|-----|
+| Clean raw mic audio into broadcast-ish voice | `audio-clean.sh` | [audio-clean.md](audio-clean.md) |
 | Make YouTube-ready videos from audio + images | `make_videos.sh` | [make-videos.md](make-videos.md) |
 | Upload one video/day to YouTube (private, safe) | `youtube_upload.py` / `youtube_upload.sh` | [youtube-upload.md](youtube-upload.md) |
 | Run the uploader daily at 18:00 São Paulo | `install_timer.sh` | [scheduling.md](scheduling.md) |
@@ -14,6 +15,9 @@ source**.
 
 ```bash
 cd ~/projects/navylily-tools
+
+# 0. (optional) clean a raw mic recording into broadcast-ish voice
+./audio-clean.sh raw.wav videos/audio/lesson.wav
 
 # 1. drop inputs in
 cp ~/audio/*.wav  videos/audio/
@@ -47,6 +51,9 @@ libs into an ephemeral `nix shell` on demand and strip a leaked
 
 ```
 navylily-tools/
+  audio-clean.sh          mic audio cleanup (RNNoise + EQ + loudness)
+  models/sh.rnnn          bundled RNNoise model (public domain)
+  wireplumber/            optional FIFINE capture drop-in (not auto-installed)
   make_videos.sh          video maker
   youtube_upload.py       uploader (the logic)
   youtube_upload.sh       nix wrapper for the uploader

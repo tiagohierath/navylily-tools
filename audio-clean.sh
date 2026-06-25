@@ -39,18 +39,21 @@ if [[ ! -f "$INPUT" ]]; then
     exit 1
 fi
 
-# RNNoise model (the user's original chain was missing this — arnndn fails
-# without a model file).
-RNNOISE_MODEL="${RNNOISE_MODEL:-$HERE/models/sh.rnnn}"
-if [[ ! -f "$RNNOISE_MODEL" ]]; then
-    echo "RNNoise model not found: $RNNOISE_MODEL" >&2
+# The denoise/EQ/compression chain is shared with make_videos.sh (one source of
+# truth), so the cleanup is identical whether you run this standalone or render
+# straight to a video.
+source "$HERE/lib/voice-chain.sh"
+
+# RNNoise model (the original chain was missing this — arnndn fails without it).
+if [[ ! -f "$VOICE_RNNOISE_MODEL" ]]; then
+    echo "RNNoise model not found: $VOICE_RNNOISE_MODEL" >&2
     echo "Restore models/sh.rnnn, or set RNNOISE_MODEL=/path/to/model.rnnn." >&2
     exit 1
 fi
 
 # Need an ffmpeg that actually has the arnndn filter. The stock NixOS system
 # ffmpeg often doesn't, so re-exec inside nix's ffmpeg if it's missing.
-if ! ffmpeg -hide_banner -filters 2>/dev/null | grep -q 'arnndn'; then
+if ! voice_ffmpeg_has_arnndn; then
     if command -v nix >/dev/null 2>&1; then
         echo "This ffmpeg has no arnndn filter — re-executing inside 'nix shell nixpkgs#ffmpeg' ..."
         exec env -u LD_LIBRARY_PATH nix shell nixpkgs#ffmpeg --command bash "$0" "$@"
@@ -62,20 +65,14 @@ fi
 
 echo "Cleaning : $INPUT"
 echo "Output   : $OUTPUT"
-echo "RNNoise  : $RNNOISE_MODEL"
+echo "RNNoise  : $VOICE_RNNOISE_MODEL"
 
-# Newlines inside the filter string are fine for ffmpeg; kept for readability.
+# Shared cleanup chain + a single-pass loudnorm to -16 (podcast-ish).
 # NOTE: loudnorm internally upsamples to 192 kHz for its true-peak limiter and
 # does NOT come back down on its own, so we pin the output to 48 kHz with -ar
 # (otherwise every file lands at a bloated 192 kHz).
-ffmpeg -y -i "$INPUT" -af "
-highpass=f=80,
-lowpass=f=16000,
-arnndn=m='${RNNOISE_MODEL}',
-equalizer=f=250:t=q:w=1:g=-2,
-equalizer=f=3500:t=q:w=1:g=2,
-acompressor=threshold=-18dB:ratio=3:attack=5:release=100,
-loudnorm=I=-16:TP=-1.5:LRA=11
-" -ar 48000 "$OUTPUT"
+ffmpeg -y -i "$INPUT" \
+    -af "$(voice_cleanup_chain),loudnorm=I=-16:TP=-1.5:LRA=11" \
+    -ar 48000 "$OUTPUT"
 
 echo "Done -> $OUTPUT"

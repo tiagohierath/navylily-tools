@@ -78,17 +78,26 @@ and thus none of it is subject to copyright").
 - **Target loudness** — `loudnorm=I=-16`. `-16` is podcast-ish; YouTube refs
   `-14`.
 
-## Using it with `make_videos.sh`
+> The cleanup stages (everything before loudnorm) live in
+> [`lib/voice-chain.sh`](../lib/voice-chain.sh) and are **shared** with
+> `make_videos.sh`, so editing the EQ/denoise/compression there changes both.
+> This script just appends a single-pass `loudnorm=-16`.
 
-`make_videos.sh` already runs its **own** two-pass `loudnorm` (target `-14`) +
-compression on whatever audio you feed it. So if you clean a file here and then
-build a video from it, the **noise removal + EQ** is the real value-add; the
-loudness/compression gets partly redone (harmless — the final video ends at
-`-14` for YouTube). For the navylily pipeline:
+## Using it with `make_videos.sh` (one system)
+
+You do **not** need to run this before making a video. `make_videos.sh` now runs
+the **same** cleanup itself (`AUDIO_CLEAN=1`, on by default) and then its own
+two-pass `loudnorm` to `-14` for YouTube — one compression, one loudnorm, no
+double processing. So the video path is just:
 
 ```
-record raw → audio-clean.sh → put result in videos/audio/ → make_videos.sh → upload
+record raw → drop in videos/audio/ → make_videos.sh → upload
 ```
+
+Use **`audio-clean.sh` standalone** when you want a cleaned **audio file** on its
+own (a podcast cut, or to pre-listen and tune the EQ/denoise before rendering).
+Don't clean here *and* re-feed it through `make_videos.sh` — that would compress
+twice; let one of them do it.
 
 ## Reality check (measured on this machine)
 

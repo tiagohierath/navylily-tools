@@ -16,15 +16,16 @@ source**.
 ```bash
 cd ~/projects/navylily-tools
 
-# 0. (optional) clean a raw mic recording into broadcast-ish voice
-./audio-clean.sh raw.wav videos/audio/lesson.wav
-
-# 1. drop inputs in
-cp ~/audio/*.wav  videos/audio/
+# 1. drop inputs in — RAW mic audio is fine, make_videos cleans it for you
+cp ~/audio/*.wav  videos/audio/      # raw FIFINE recordings
 cp ~/photos/*.jpg videos/images/
 
 # 2. render every audio file into videos/output/*.mp4
+#    (auto: RNNoise denoise + EQ + compression + loudness, then video)
 ./make_videos.sh
+
+#    (standalone audio cleanup, e.g. for a podcast cut, is also available:)
+#    ./audio-clean.sh raw.wav clean.wav
 
 # 3. one-time YouTube auth (opens a browser)
 mkdir -p ~/.local/state/navylily-youtube

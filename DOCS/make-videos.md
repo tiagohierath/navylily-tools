@@ -23,13 +23,19 @@ zoom and a serif watermark. Output lands in `videos/output/<audioname>.mp4`.
 
 ```bash
 ./make_videos.sh                                   # render everything pending
+./make_videos.sh bitcoin                           # render ONLY files matching "bitcoin" (test one)
 nix shell nixpkgs#ffmpeg --command ./make_videos.sh   # pin ffmpeg explicitly
 VIDEO_BASE_DIR=/other/tree ./make_videos.sh        # use a different videos/ dir
 FONTFILE=/path/to/Font.ttf ./make_videos.sh        # use a different watermark font
 
 # re-render one file: delete its output first (the skip-check keys on the .mp4)
-rm videos/output/bitcoin.mp4 && ./make_videos.sh
+rm videos/output/bitcoin.mp4 && ./make_videos.sh bitcoin
 ```
+
+The optional first argument is a **name fragment**: only audio files whose
+filename contains it are rendered (`./make_videos.sh aprenda` would do both
+`aprenda_*` files). No argument = render everything pending. Unmatched =
+it lists what's available and exits.
 
 There is an identical copy at `~/projects/video` (run `./video`); the canonical
 one is `make_videos.sh` in this repo.

@@ -34,6 +34,10 @@
 #
 #   Nothing is left installed afterwards.
 #
+#   Render just ONE file (matches by name fragment — good for a quick test):
+#
+#       ./make_videos.sh bitcoin
+#
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -135,6 +139,24 @@ image_files=("$IMAGES_DIR"/*.jpg "$IMAGES_DIR"/*.jpeg "$IMAGES_DIR"/*.png)
 if [[ ${#audio_files[@]} -eq 0 ]]; then
     echo "No audio files found in $AUDIO_DIR. Drop some in and re-run." >&2
     exit 1
+fi
+
+# Optional filter: pass a name (or fragment) to render only matching audio
+# file(s) — handy for testing one before committing to the whole batch:
+#   ./make_videos.sh bitcoin
+if [[ $# -ge 1 ]]; then
+    filter="$1"
+    filtered=()
+    for a in "${audio_files[@]}"; do
+        [[ "$(basename "$a")" == *"$filter"* ]] && filtered+=("$a")
+    done
+    if [[ ${#filtered[@]} -eq 0 ]]; then
+        echo "No audio file in $AUDIO_DIR matches '$filter'." >&2
+        echo "Available:" >&2
+        printf '  %s\n' "${audio_files[@]##*/}" >&2
+        exit 1
+    fi
+    audio_files=("${filtered[@]}")
 fi
 if [[ ${#image_files[@]} -eq 0 ]]; then
     echo "No image files found in $IMAGES_DIR. Drop some in and re-run." >&2

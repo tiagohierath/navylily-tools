@@ -8,13 +8,10 @@ Small tools for the [navylily.tv](https://navylily.tv) workflow:
 2. **`make_videos.sh`** — turn audio + a folder of images into high-quality,
    YouTube-ready 4:3 1080p videos with a subtle, smooth 60fps zoom and a
    condensed-serif watermark.
-3. **`youtube_upload.py`** (+ `youtube_upload.sh`) — upload **one** video per
-   day to YouTube as a **private** video, built so it is *physically incapable*
-   of over-posting.
 
 Designed for a declarative/ephemeral NixOS machine: nothing is installed
-system-wide. The scripts fetch their dependencies (`ffmpeg`, Python + Google
-client libs) into an ephemeral `nix shell` on demand.
+system-wide. The scripts fetch their dependencies (`ffmpeg`) into an ephemeral
+`nix shell` on demand.
 
 > **Practical, command-first docs** (every knob you can edit, every command you
 > can run) live in [`DOCS/`](DOCS/README.md).
@@ -58,72 +55,6 @@ What it does:
 
 The font is bundled (`videos/fonts/Cormorant.ttf`, OFL — see
 `videos/fonts/Cormorant-OFL.txt`).
-
-## 2. youtube_upload
-
-Posts **one** video per run from `videos/output/`, **private**, with a random
-working title (set the real title + thumbnail and publish manually later).
-
-Three independent guards make over-posting impossible:
-
-1. **Daily state** — a JSON file records the last upload; if today already had
-   one (or the cooldown hasn't elapsed) the run exits immediately.
-2. **Single-item** — exactly one video per run, no folder loop in live mode.
-3. **Run lock** — an exclusive `flock`; overlapping runs exit at once.
-
-And every successful upload is recorded by content hash, so a file is **never
-uploaded twice**.
-
-> `YT_MIN_HOURS_BETWEEN` defaults to `24` (at most one per day). Set it to `168`
-> to enforce "at most once per week".
-
-### Setup (no secrets in this repo)
-
-1. In Google Cloud Console: enable **YouTube Data API v3**, create an OAuth
-   **Desktop** client, download it.
-2. Put it where the script looks (default `~/.local/state/navylily-youtube/`):
-   ```bash
-   mkdir -p ~/.local/state/navylily-youtube
-   cp ~/Downloads/client_secret_*.json ~/.local/state/navylily-youtube/client_secret.json
-   ```
-3. Authorize once (opens a browser):
-   ```bash
-   ./youtube_upload.sh --authorize
-   ```
-
-### Run
-
-```bash
-./youtube_upload.sh --dry-run   # exercise guards + selection, no upload
-./youtube_upload.sh --status    # show state
-./youtube_upload.sh             # live: at most one upload
-```
-
-Env overrides: `YT_OUTPUT_DIR`, `YT_STATE_DIR`, `YT_CLIENT_SECRET`, `YT_TOKEN`,
-`YT_TZ` (default `America/Sao_Paulo`), `YT_MIN_HOURS_BETWEEN`.
-
-### Schedule — 18:00 São Paulo, daily
-
-```bash
-./install_timer.sh              # user systemd timer @ 18:00 America/Sao_Paulo
-loginctl enable-linger "$USER"  # so it runs while logged out
-```
-
-The script's guards hold regardless of the scheduler, so the timer only has to
-be roughly right. To remove: `./install_timer.sh --remove`.
-
-Prefer fully-declarative NixOS? Fold the equivalent into your config:
-
-```nix
-systemd.user.services.navylily-youtube = {
-  description = "Navylily — upload one video to YouTube (private)";
-  serviceConfig.ExecStart = "/path/to/navylily-tools/youtube_upload.sh";
-};
-systemd.user.timers.navylily-youtube = {
-  wantedBy = [ "timers.target" ];
-  timerConfig = { OnCalendar = "*-*-* 18:00:00 America/Sao_Paulo"; Persistent = true; };
-};
-```
 
 ## License
 

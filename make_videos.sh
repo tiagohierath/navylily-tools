@@ -3,9 +3,9 @@
 # make_videos.sh
 #
 # Converts every audio file in videos/audio into a high-quality, YouTube-ready
-# video using a randomly shuffled slideshow of videos/images. Each image gets a
-# very subtle, smooth 60fps zoom (randomly in or out) and the first 30 seconds
-# carry a watermark set in a condensed serif font (Cormorant).
+# video using a randomly shuffled slideshow of videos/images. Each image is shown
+# as a static frame (no zoom, pan, or animation) and the first 30 seconds carry a
+# watermark set in a classic serif font (Garamond).
 #
 # The audio is normalized + lightly compressed for YouTube (loudness ~ -14 LUFS,
 # EBU R128 two-pass) so every upload sits at a consistent, broadcast-friendly
@@ -15,13 +15,13 @@
 #   videos/audio/    -> input audio files (wav, mp3, m4a, flac, ...)
 #   videos/images/   -> input images (jpg, jpeg, png)
 #   videos/output/   -> generated videos land here
-#   videos/fonts/    -> bundled Cormorant.ttf (condensed serif watermark)
+#   videos/fonts/    -> bundled EBGaramond.ttf (serif watermark font)
 #
 # The heavy lifting goes into AUDIO: optional voice cleanup (RNNoise denoise +
 # EQ + compression, shared with audio-clean.sh) then two-pass EBU R128 loudness.
 # So you can drop RAW mic recordings straight into videos/audio/. VIDEO is
-# tuned for speed at the same visual quality: 1080p only (never 4k), a light
-# 1.25x oversample for the zoom, and each frame encoded exactly ONCE (crf 17,
+# tuned for speed at the same visual quality: 1080p only (never 4k), static
+# frames (no zoom/pan/animation), and each frame encoded exactly ONCE (crf 17,
 # preset fast). Per-image clips are rendered straight to final quality with the
 # watermark baked in, then concatenated with -c copy and the audio muxed on top
 # (+faststart for streaming) — so nothing is ever re-encoded.
@@ -57,12 +57,7 @@ WORK_DIR="$(mktemp -d)"
 
 WIDTH=1440          # 4:3 at 1080p height (always 1080p, never 4k)
 HEIGHT=1080
-FPS=60              # smooth motion for the subtle zoom
-
-# Oversample factor for the zoom. The zoom is tiny (<=6%), so even 1.25x leaves
-# the crop plenty of real pixels with zero upscaling — and it keeps processing
-# near 1080p instead of ballooning to 4k.
-SUPERSAMPLE=1.25
+FPS=60              # output frame rate (frames are static — no motion)
 
 # Image on-screen durations (still random per image). The first FAST_COUNT
 # images flash by to open with energy; everything after settles into a calmer
@@ -73,12 +68,6 @@ FAST_MAX_SECONDS=3
 REST_MIN_SECONDS=3
 REST_MAX_SECONDS=5
 
-# Subtle zoom: each image drifts by a random amount in this range, and the
-# direction (in or out) is chosen at random per image. Keep these small — the
-# whole point is that the motion is barely perceptible but alive.
-ZOOM_MIN_AMOUNT=0.03   # +3%  over the clip
-ZOOM_MAX_AMOUNT=0.06   # +6%  over the clip
-
 # YouTube loudness target (EBU R128). YouTube normalizes to roughly -14 LUFS.
 LOUDNORM_I=-14
 LOUDNORM_TP=-1.5
@@ -87,9 +76,17 @@ LOUDNORM_LRA=11
 WATERMARK_TEXT="Aulas completas em navylily.tv"
 WATERMARK_SECONDS=30
 
-# Condensed serif font for the navylily.tv watermark. Defaults to the bundled
-# Cormorant. Override with: FONTFILE=/path/to/font.ttf ./video
+# Serif font for the navylily.tv watermark. Defaults to the bundled
+# Garamond. Override with: FONTFILE=/path/to/font.ttf ./video
 FONTFILE="${FONTFILE:-}"
+
+# Outro card shown (static, full-frame) at the very end of EVERY video: a 4:3
+# black frame with centered white "Navylily.tv" in Garamond. Generated once with
+# ImageMagick if missing. Override the path with OUTRO_IMAGE=..., the text with
+# OUTRO_TEXT=..., or the on-screen time with OUTRO_SECONDS=...
+OUTRO_IMAGE="${OUTRO_IMAGE:-$BASE_DIR/outro.png}"
+OUTRO_TEXT="${OUTRO_TEXT:-Navylily.tv}"
+OUTRO_SECONDS="${OUTRO_SECONDS:-3}"
 
 # Clean the audio (RNNoise denoise + EQ + compression) before normalizing, so
 # you can drop RAW mic recordings straight into videos/audio/. Needs the arnndn
@@ -129,15 +126,15 @@ if [[ "$_need_nix" == "1" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Locate the condensed serif font for the watermark.
+# Locate the serif font for the watermark.
 # ---------------------------------------------------------------------------
 find_font() {
     if [[ -n "$FONTFILE" && -f "$FONTFILE" ]]; then
         echo "$FONTFILE"; return
     fi
-    # Prefer the bundled Cormorant (condensed serif).
+    # Prefer the bundled Garamond (serif).
     local c
-    for c in "$FONTS_DIR/Cormorant.ttf" "$FONTS_DIR"/*.ttf; do
+    for c in "$FONTS_DIR/EBGaramond.ttf" "$FONTS_DIR/Garamond.ttf" "$FONTS_DIR"/*.ttf; do
         [[ -f "$c" ]] && { echo "$c"; return; }
     done
     # Fall back to any serif fontconfig can resolve.
@@ -154,6 +151,32 @@ if [[ -z "$FONTFILE" ]]; then
     echo "WARNING: no font found for the watermark. Drop a .ttf in $FONTS_DIR" >&2
     echo "or set FONTFILE=/path/to/font.ttf. Continuing without watermark text." >&2
 fi
+
+# ---------------------------------------------------------------------------
+# Ensure the outro card exists. It's a 4:3 black frame with centered white text
+# in the same Garamond as the watermark. Generated once with ImageMagick (falls
+# back to nix if magick isn't on PATH); reused on every later run.
+# ---------------------------------------------------------------------------
+ensure_outro() {
+    [[ -f "$OUTRO_IMAGE" ]] && return 0
+    local mk=()
+    if command -v magick >/dev/null 2>&1; then
+        mk=(magick)
+    elif command -v convert >/dev/null 2>&1; then
+        mk=(convert)
+    elif command -v nix >/dev/null 2>&1; then
+        mk=(env -u LD_LIBRARY_PATH nix run nixpkgs#imagemagick -- magick)
+    else
+        echo "WARNING: $OUTRO_IMAGE missing and ImageMagick/nix unavailable to" >&2
+        echo "generate it. Videos will render WITHOUT the outro card." >&2
+        return 1
+    fi
+    echo "Generating outro card -> $OUTRO_IMAGE"
+    "${mk[@]}" -size "${WIDTH}x${HEIGHT}" canvas:black \
+        ${FONTFILE:+-font "$FONTFILE"} -fill white -pointsize 130 -gravity center \
+        -annotate +0+0 "$OUTRO_TEXT" "$OUTRO_IMAGE"
+}
+ensure_outro || true
 
 # ---------------------------------------------------------------------------
 # Setup folders
@@ -253,31 +276,17 @@ get_audio_duration() {
 }
 
 # ---------------------------------------------------------------------------
-# Per-image clip with a subtle, smooth zoom (random direction).
+# Per-image clip — a static frame (no zoom, pan, or animation).
 #
 # Encoded ONCE, straight to the final delivery settings (crf 17, yuv420p,
 # High@4.2) with its slice of the watermark baked in. The clips are then
 # concatenated with -c copy and the audio muxed on top, so no frame is ever
-# re-encoded. zoompan runs at FPS with a per-output-frame linear z, so the
-# motion is perfectly smooth rather than stepped.
+# re-encoded.
 #
 # Args: <image> <duration_s> <timeline_offset_s> <out.mp4>
 # ---------------------------------------------------------------------------
 make_image_clip() {
     local img="$1" duration="$2" offset="$3" out="$4"
-    local frames amount zexpr
-    frames=$(awk -v d="$duration" -v f="$FPS" 'BEGIN{printf "%d", d*f}')
-    (( frames < 2 )) && frames=2
-    amount="$(random_float "$ZOOM_MIN_AMOUNT" "$ZOOM_MAX_AMOUNT")"
-
-    # Random direction: in (start 1.0, grow) or out (start 1+amount, shrink).
-    if (( RANDOM % 2 == 0 )); then
-        # zoom in: 1.0 -> 1+amount, linear over the clip
-        zexpr="1.0+(on/${frames})*${amount}"
-    else
-        # zoom out: 1+amount -> 1.0, linear over the clip
-        zexpr="(1.0+${amount})-(on/${frames})*${amount}"
-    fi
 
     # Watermark: bake it onto the part of THIS clip that lands within the first
     # WATERMARK_SECONDS of the whole video. offset = this clip's start time, and
@@ -295,20 +304,17 @@ make_image_clip() {
         fi
     fi
 
-    # Fill the 4:3 frame with NO distortion and NO black bars/columns, whatever
-    # the source shape:
-    #   - scale ...:force_original_aspect_ratio=increase  -> cover the frame,
-    #     keeping the image's aspect ratio (so it's never stretched);
-    #   - crop ...                                         -> trim the overflow
-    #     (so there are never letterbox/pillarbox bars);
+    # Show the WHOLE image inside the 4:3 frame, always fully visible, with NO
+    # distortion, whatever the source shape:
+    #   - scale ...:force_original_aspect_ratio=decrease  -> fit the image inside
+    #     the frame, keeping its aspect ratio (so it's never stretched/cropped);
+    #   - pad ...                                          -> center it and fill
+    #     any leftover space with black bars (letterbox/pillarbox);
     #   - setsar=1                                         -> square pixels, so a
     #     non-square source SAR can't make it look stretched on playback.
-    # SUPERSAMPLE just gives the zoom crop spare real pixels to work with.
-    local ss_w ss_h
-    ss_w=$(awk -v w="$WIDTH" -v f="$SUPERSAMPLE" 'BEGIN{printf "%d", w*f}')
-    ss_h=$(awk -v h="$HEIGHT" -v f="$SUPERSAMPLE" 'BEGIN{printf "%d", h*f}')
-    ffmpeg -y -loop 1 -i "$img" -t "$duration" \
-        -vf "scale=${ss_w}:${ss_h}:force_original_aspect_ratio=increase,setsar=1,crop=${ss_w}:${ss_h},zoompan=z='${zexpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${WIDTH}x${HEIGHT}:fps=${FPS}${dt},format=yuv420p" \
+    # The frame is static — no zoom, pan, or animation.
+    ffmpeg -y -loop 1 -i "$img" -t "$duration" -r "$FPS" \
+        -vf "scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1${dt},format=yuv420p" \
         -c:v libx264 -preset fast -crf 17 -pix_fmt yuv420p -profile:v high -level 4.2 -an "$out" >/dev/null 2>&1
 }
 
@@ -399,6 +405,18 @@ for audio in "${audio_files[@]}"; do
         offset=$(awk -v o="$offset" -v d="$dur" 'BEGIN{printf "%.4f", o+d}')
     done
 
+    # Outro card: append a static OUTRO_SECONDS clip (no watermark — pass an
+    # offset >= WATERMARK_SECONDS) so EVERY video ends on the Navylily.tv frame.
+    # total_video is the exact final length (slideshow + outro) we pad audio to.
+    total_video="$offset"
+    if [[ -f "$OUTRO_IMAGE" ]]; then
+        outro_clip="$run_dir/clip_outro.mp4"
+        echo "  [outro] $(basename "$OUTRO_IMAGE") for ${OUTRO_SECONDS}s"
+        make_image_clip "$OUTRO_IMAGE" "$OUTRO_SECONDS" "$WATERMARK_SECONDS" "$outro_clip"
+        echo "file '$outro_clip'" >> "$concat_list"
+        total_video=$(awk -v o="$offset" -v e="$OUTRO_SECONDS" 'BEGIN{printf "%.4f", o+e}')
+    fi
+
     # Normalize + compress audio for YouTube — this is where the effort goes.
     norm_audio="$run_dir/audio_norm.wav"
     normalize_audio "$audio" "$norm_audio"
@@ -406,12 +424,17 @@ for audio in "${audio_files[@]}"; do
     # Mux: the clips are already final-quality H.264 with the watermark baked in,
     # so the VIDEO IS COPIED (never re-encoded) and only the audio is encoded.
     # Each frame is therefore encoded exactly once — the main speed win.
+    #
+    # apad + -t total_video pads the speech with trailing silence so the audio
+    # spans the full timeline: the outro card (and any slideshow overshoot past
+    # the speech) plays over silence instead of being cut by -shortest.
     echo "  muxing (video copied, audio encoded)..."
     tmp_out="$run_dir/final.mp4"
     ffmpeg -y -f concat -safe 0 -i "$concat_list" -i "$norm_audio" \
         -map 0:v:0 -map 1:a:0 \
+        -af apad -t "$total_video" \
         -c:v copy -c:a aac -b:a 320k \
-        -movflags +faststart -shortest \
+        -movflags +faststart \
         "$tmp_out" >/dev/null 2>&1
 
     # Atomic publish so an interrupted run never leaves a half-written .mp4

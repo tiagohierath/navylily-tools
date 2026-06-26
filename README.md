@@ -27,6 +27,7 @@ system-wide. The scripts fetch their dependencies (`ffmpeg`) into an ephemeral
 videos/
   audio/    input audio (wav, mp3, m4a, flac, ...)
   images/   input images (jpg, jpeg, png)
+  music/    optional background music, cycled + mixed very subtly (optional)
   output/   generated .mp4 land here
   fonts/    Cormorant.ttf (condensed serif watermark)
 ```
@@ -46,8 +47,12 @@ What it does:
 - Each image gets a **very subtle** zoom, randomly in or out, perfectly smooth
   (lossless intermediate clips, single quality-first final pass — `crf 17`,
   `preset veryslow`).
-- Audio is **normalized + lightly compressed for YouTube** (two-pass EBU R128,
-  target ≈ −14 LUFS).
+- Audio is used **as-is — no processing** (no denoise/EQ, compression, or
+  loudness normalization); each file is muxed at its original level.
+- Drop tracks in `videos/music/` for an optional **very subtle background bed**:
+  tracks are cycled across renders (each video starts on the next one) and
+  looped to fill the timeline, then ducked ≈24 dB under the narration. Tune with
+  `MUSIC_GAIN_DB` (toward 0 = louder), or `MUSIC=0` to disable.
 - Watermark "Aulas completas em navylily.tv" in **Cormorant** (condensed serif)
   for the first 30s.
 - **Never renders the same output twice** — skips if the `.mp4` exists, and

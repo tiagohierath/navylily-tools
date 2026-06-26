@@ -7,19 +7,19 @@
 # as a static frame (no zoom, pan, or animation) and the first 30 seconds carry a
 # watermark set in a classic serif font (Garamond).
 #
-# The audio is normalized + lightly compressed for YouTube (loudness ~ -14 LUFS,
-# EBU R128 two-pass) so every upload sits at a consistent, broadcast-friendly
-# level.
+# The audio is used as-is — no processing at all (no denoise/EQ, compression, or
+# loudness normalization). Files are muxed at their original level; optional
+# background music is mixed subtly underneath.
 #
 # Layout (created automatically if missing):
 #   videos/audio/    -> input audio files (wav, mp3, m4a, flac, ...)
 #   videos/images/   -> input images (jpg, jpeg, png)
+#   videos/music/    -> optional background music, cycled + mixed very subtly
 #   videos/output/   -> generated videos land here
 #   videos/fonts/    -> bundled EBGaramond.ttf (serif watermark font)
 #
-# The heavy lifting goes into AUDIO: optional voice cleanup (RNNoise denoise +
-# EQ + compression, shared with audio-clean.sh) then two-pass EBU R128 loudness.
-# So you can drop RAW mic recordings straight into videos/audio/. VIDEO is
+# AUDIO is passed through untouched — no denoise/EQ, no compression, no loudness
+# normalization — so each file is muxed at its original level. VIDEO is
 # tuned for speed at the same visual quality: 1080p only (never 4k), static
 # frames (no zoom/pan/animation), and each frame encoded exactly ONCE (crf 17,
 # preset fast). Per-image clips are rendered straight to final quality with the
@@ -48,11 +48,17 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Config — tweak these as needed
 # ---------------------------------------------------------------------------
-BASE_DIR="${VIDEO_BASE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/videos}"
+# Resolve this script's REAL directory, following symlinks, so it works when
+# invoked via a symlink on PATH from any directory — lib/, models/, fonts/ and
+# videos/ all resolve to the repo, not to the symlink's location. Override the
+# media root with VIDEO_BASE_DIR=... to put it elsewhere.
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+BASE_DIR="${VIDEO_BASE_DIR:-$HERE/videos}"
 AUDIO_DIR="$BASE_DIR/audio"
 IMAGES_DIR="$BASE_DIR/images"
 OUTPUT_DIR="$BASE_DIR/output"
 FONTS_DIR="$BASE_DIR/fonts"
+MUSIC_DIR="$BASE_DIR/music"   # background music bed; cycled across renders
 WORK_DIR="$(mktemp -d)"
 
 WIDTH=1440          # 4:3 at 1080p height (always 1080p, never 4k)
@@ -68,10 +74,19 @@ FAST_MAX_SECONDS=3
 REST_MIN_SECONDS=10
 REST_MAX_SECONDS=20
 
-# YouTube loudness target (EBU R128). YouTube normalizes to roughly -14 LUFS.
-LOUDNORM_I=-14
-LOUDNORM_TP=-1.5
-LOUDNORM_LRA=11
+# Background music bed. Drop any number of tracks in videos/music/ and they're
+# cycled across renders: each video starts on the next track in the folder and
+# the rotation loops to fill the whole timeline, so a short loop never runs out
+# and consecutive videos don't all open on the same song. The bed is used at its
+# original level and then pulled WAY down by MUSIC_GAIN_DB so it sits *very*
+# subtly under the narration — felt more than heard. Empty/missing folder => no
+# music, audio path is unchanged.
+#   MUSIC_GAIN_DB: attenuation applied to the bed before it's mixed under the
+#   narration. -24 dB keeps it as barely-there ambience.
+#   Set MUSIC=0 to disable, or raise MUSIC_GAIN_DB toward 0 to bring it forward.
+MUSIC="${MUSIC:-1}"
+MUSIC_GAIN_DB="${MUSIC_GAIN_DB:--24}"  # duck the bed this far under the voice
+MUSIC_ROTATION=0                 # which track the NEXT video starts on (cycles)
 
 WATERMARK_TEXT="Aulas completas em navylily.tv"
 WATERMARK_SECONDS=30
@@ -88,24 +103,12 @@ OUTRO_IMAGE="${OUTRO_IMAGE:-$BASE_DIR/outro.png}"
 OUTRO_TEXT="${OUTRO_TEXT:-Navylily.tv}"
 OUTRO_SECONDS="${OUTRO_SECONDS:-3}"
 
-# Clean the audio (RNNoise denoise + EQ + compression) before normalizing, so
-# you can drop RAW mic recordings straight into videos/audio/. Needs the arnndn
-# filter — the script switches to nix's ffmpeg if the local one lacks it. Set
-# AUDIO_CLEAN=0 to skip it (faster, no RNNoise; for already-produced audio).
-AUDIO_CLEAN="${AUDIO_CLEAN:-1}"
-
-# Shared voice-cleanup filter chain, kept in sync with audio-clean.sh.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/voice-chain.sh"
-
 # ---------------------------------------------------------------------------
-# Make sure ffmpeg/ffprobe are available — and, if cleaning audio, that ffmpeg
-# has the arnndn filter. Auto-wrap with nix's ffmpeg if not.
+# Make sure ffmpeg/ffprobe are available. Auto-wrap with nix's ffmpeg if not.
 # ---------------------------------------------------------------------------
 _need_nix=0; _need_reason=""
 if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
     _need_nix=1; _need_reason="ffmpeg/ffprobe not found on PATH"
-elif [[ "$AUDIO_CLEAN" == "1" ]] && ! voice_ffmpeg_has_arnndn; then
-    _need_nix=1; _need_reason="audio cleaning needs the arnndn filter, missing from this ffmpeg"
 fi
 if [[ "$_need_nix" == "1" ]]; then
     # A leaked LD_LIBRARY_PATH (e.g. host alsa-lib built against a newer glibc)
@@ -119,8 +122,8 @@ if [[ "$_need_nix" == "1" ]]; then
         exec env -u LD_LIBRARY_PATH nix-shell -p ffmpeg --run "bash '$0' $*"
     else
         echo "ERROR: $_need_reason, and nix is not available to fetch ffmpeg." >&2
-        echo "Either set AUDIO_CLEAN=0, or run inside a shell that has an ffmpeg" >&2
-        echo "with arnndn, e.g.:  nix shell nixpkgs#ffmpeg --command ./make_videos.sh" >&2
+        echo "Run inside a shell that has ffmpeg, e.g.:" >&2
+        echo "  nix shell nixpkgs#ffmpeg --command ./make_videos.sh" >&2
         exit 1
     fi
 fi
@@ -181,7 +184,7 @@ ensure_outro || true
 # ---------------------------------------------------------------------------
 # Setup folders
 # ---------------------------------------------------------------------------
-mkdir -p "$AUDIO_DIR" "$IMAGES_DIR" "$OUTPUT_DIR" "$FONTS_DIR"
+mkdir -p "$AUDIO_DIR" "$IMAGES_DIR" "$OUTPUT_DIR" "$FONTS_DIR" "$MUSIC_DIR"
 
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
@@ -190,6 +193,7 @@ shopt -s nullglob nocaseglob
 
 audio_files=("$AUDIO_DIR"/*.wav "$AUDIO_DIR"/*.mp3 "$AUDIO_DIR"/*.m4a "$AUDIO_DIR"/*.flac "$AUDIO_DIR"/*.aac "$AUDIO_DIR"/*.ogg)
 image_files=("$IMAGES_DIR"/*.jpg "$IMAGES_DIR"/*.jpeg "$IMAGES_DIR"/*.png)
+music_files=("$MUSIC_DIR"/*.wav "$MUSIC_DIR"/*.mp3 "$MUSIC_DIR"/*.m4a "$MUSIC_DIR"/*.flac "$MUSIC_DIR"/*.aac "$MUSIC_DIR"/*.ogg)
 
 if [[ ${#audio_files[@]} -eq 0 ]]; then
     echo "No audio files found in $AUDIO_DIR. Drop some in and re-run." >&2
@@ -219,6 +223,11 @@ if [[ ${#image_files[@]} -eq 0 ]]; then
 fi
 
 echo "Found ${#audio_files[@]} audio file(s) and ${#image_files[@]} image(s)."
+if [[ "$MUSIC" == "1" && ${#music_files[@]} -gt 0 ]]; then
+    echo "Background music: ${#music_files[@]} track(s) cycled at ${MUSIC_GAIN_DB} dB (very subtle)."
+else
+    echo "Background music: none."
+fi
 echo "Watermark font: ${FONTFILE:-<none>}"
 
 # ---------------------------------------------------------------------------
@@ -319,48 +328,50 @@ make_image_clip() {
 }
 
 # ---------------------------------------------------------------------------
-# Audio for the video: optional voice cleanup (shared with audio-clean.sh) +
-# two-pass EBU R128 loudness normalization for YouTube. One compression, one
-# loudnorm — no double processing. Writes a clean 48kHz stereo wav to $2.
+# Audio for the video: no processing at all. The source narration is just
+# transcoded to a consistent 48kHz stereo wav (so the mux has a uniform format
+# to work with) and used at its original level. Writes the wav to $2.
 # ---------------------------------------------------------------------------
-normalize_audio() {
+prepare_audio() {
     local in="$1" out="$2"
-    local src="$in" pre=""
+    ffmpeg -y -i "$in" -ar 48000 -ac 2 -c:a pcm_s16le "$out" >/dev/null 2>&1
+}
 
-    # When cleaning, bake the voice cleanup into an intermediate file FIRST, then
-    # run the two-pass loudnorm on that FIXED file: both passes then measure and
-    # apply against an identical signal, and RNNoise runs once instead of twice.
-    # Verified on real speech (espeak + room noise): lands ~-14.6 LUFS.
-    if [[ "$AUDIO_CLEAN" == "1" ]]; then
-        echo "  cleaning audio (RNNoise denoise + EQ + compression)..."
-        src="${out%.*}.clean.wav"
-        ffmpeg -y -i "$in" -af "$(voice_cleanup_chain)" \
-            -ar 48000 -ac 2 -c:a pcm_s16le "$src" >/dev/null 2>&1
-    else
-        pre="acompressor=threshold=-18dB:ratio=3:attack=20:release=250,"
-    fi
+# ---------------------------------------------------------------------------
+# Background music bed. Cycles through videos/music/, starting on the track at
+# MUSIC_ROTATION (which advances by one per video) and looping the folder until
+# the bed is at least $needed seconds long, then trims to exactly that. The bed
+# is used at its original level — no normalization, no fades. The big
+# MUSIC_GAIN_DB attenuation happens later, in the mux, so the bed sits *very*
+# subtly under the narration. Writes a 48kHz stereo wav to $2 and returns
+# non-zero (no bed written) when there's no music.
+#
+# Args: <needed_seconds> <out.wav>
+# ---------------------------------------------------------------------------
+build_music_bed() {
+    local needed="$1" out="$2"
+    local n=${#music_files[@]}
+    (( n == 0 )) && return 1
 
-    echo "  measuring loudness (pass 1/2)..."
-    local measured
-    measured="$(ffmpeg -hide_banner -i "$src" \
-        -af "${pre}loudnorm=I=${LOUDNORM_I}:TP=${LOUDNORM_TP}:LRA=${LOUDNORM_LRA}:print_format=json" \
-        -f null - 2>&1 | awk '/^\{/{c=1} c{print} /^\}/{c=0}')"
+    # Cycle the folder (looping) until we've queued enough audio to cover the
+    # whole timeline. Starting offset rotates per video so consecutive renders
+    # don't all open on the same song.
+    local list="$out.concat.txt"; : > "$list"
+    local total=0 i=0
+    while (( $(awk -v t="$total" -v need="$needed" 'BEGIN{print (t < need)}') )); do
+        local idx=$(( (MUSIC_ROTATION + i) % n ))
+        local f="${music_files[$idx]}"
+        printf "file '%s'\n" "$f" >> "$list"
+        local d
+        d="$(get_audio_duration "$f")"
+        total="$(awk -v t="$total" -v d="$d" 'BEGIN{printf "%.4f", t+d}')"
+        i=$((i + 1))
+    done
+    # Next video starts on the next track in the folder.
+    MUSIC_ROTATION=$(( (MUSIC_ROTATION + 1) % n ))
 
-    local mi mtp mlra mthresh
-    mi="$(awk -F'"' '/input_i/{print $4}' <<<"$measured")"
-    mtp="$(awk -F'"' '/input_tp/{print $4}' <<<"$measured")"
-    mlra="$(awk -F'"' '/input_lra/{print $4}' <<<"$measured")"
-    mthresh="$(awk -F'"' '/input_thresh/{print $4}' <<<"$measured")"
-
-    local ln="loudnorm=I=${LOUDNORM_I}:TP=${LOUDNORM_TP}:LRA=${LOUDNORM_LRA}"
-    if [[ -n "$mi" && -n "$mtp" && -n "$mlra" && -n "$mthresh" ]]; then
-        ln="${ln}:measured_I=${mi}:measured_TP=${mtp}:measured_LRA=${mlra}:measured_thresh=${mthresh}:linear=true"
-    fi
-
-    echo "  applying loudness (pass 2/2)..."
-    ffmpeg -y -i "$src" \
-        -af "${pre}${ln}" \
-        -ar 48000 -ac 2 -c:a pcm_s16le "$out" >/dev/null 2>&1
+    ffmpeg -y -f concat -safe 0 -i "$list" \
+        -t "$needed" -ar 48000 -ac 2 -c:a pcm_s16le "$out" >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -417,9 +428,21 @@ for audio in "${audio_files[@]}"; do
         total_video=$(awk -v o="$offset" -v e="$OUTRO_SECONDS" 'BEGIN{printf "%.4f", o+e}')
     fi
 
-    # Normalize + compress audio for YouTube — this is where the effort goes.
-    norm_audio="$run_dir/audio_norm.wav"
-    normalize_audio "$audio" "$norm_audio"
+    # Prepare the narration audio (no processing — used at its original level,
+    # just transcoded to a uniform wav for the mux).
+    audio_wav="$run_dir/audio.wav"
+    prepare_audio "$audio" "$audio_wav"
+
+    # Optional very-subtle background music bed, cycled across renders and
+    # stretched (looped) to the full timeline length.
+    music_bed=""
+    if [[ "$MUSIC" == "1" ]]; then
+        bed="$run_dir/music_bed.wav"
+        echo "  building background music bed (${MUSIC_GAIN_DB} dB under voice)..."
+        if build_music_bed "$total_video" "$bed"; then
+            music_bed="$bed"
+        fi
+    fi
 
     # Mux: the clips are already final-quality H.264 with the watermark baked in,
     # so the VIDEO IS COPIED (never re-encoded) and only the audio is encoded.
@@ -430,12 +453,26 @@ for audio in "${audio_files[@]}"; do
     # the speech) plays over silence instead of being cut by -shortest.
     echo "  muxing (video copied, audio encoded)..."
     tmp_out="$run_dir/final.mp4"
-    ffmpeg -y -f concat -safe 0 -i "$concat_list" -i "$norm_audio" \
-        -map 0:v:0 -map 1:a:0 \
-        -af apad -t "$total_video" \
-        -c:v copy -c:a aac -b:a 320k \
-        -movflags +faststart \
-        "$tmp_out" >/dev/null 2>&1
+    if [[ -n "$music_bed" ]]; then
+        # Mix the subtle music bed under the narration. apad keeps the voice
+        # spanning the full timeline; the music is attenuated by MUSIC_GAIN_DB
+        # and amix runs with normalize=0 so the voice stays at its full level
+        # (default amix would halve both). -t trims to the exact video length.
+        music_vol="$(awk -v g="$MUSIC_GAIN_DB" 'BEGIN{printf "%.6f", 10^(g/20)}')"
+        ffmpeg -y -f concat -safe 0 -i "$concat_list" -i "$audio_wav" -i "$music_bed" \
+            -filter_complex "[1:a]apad[v];[2:a]volume=${music_vol}[m];[v][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]" \
+            -map 0:v:0 -map "[a]" -t "$total_video" \
+            -c:v copy -c:a aac -b:a 320k \
+            -movflags +faststart \
+            "$tmp_out" >/dev/null 2>&1
+    else
+        ffmpeg -y -f concat -safe 0 -i "$concat_list" -i "$audio_wav" \
+            -map 0:v:0 -map 1:a:0 \
+            -af apad -t "$total_video" \
+            -c:v copy -c:a aac -b:a 320k \
+            -movflags +faststart \
+            "$tmp_out" >/dev/null 2>&1
+    fi
 
     # Atomic publish so an interrupted run never leaves a half-written .mp4
     # that the skip-check would mistake for a finished render.

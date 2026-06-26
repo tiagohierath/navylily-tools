@@ -158,11 +158,19 @@ echo "================================================================"
 
 # ---------------------------------------------------------------------------
 # Record. We DON'T want Ctrl-C to abort the script before post-processing — it
-# should just stop wf-recorder. So run wf-recorder in the background, forward
-# SIGINT/'q' to it, then wait for it to finish writing the file.
+# should just stop wf-recorder and let it finalize the file.
+#
+# `set -m` runs wf-recorder in its OWN process group, so the terminal's Ctrl-C
+# is NOT delivered to it directly — only our trap forwards a single, clean
+# SIGINT, which lets it flush and finalize the mkv exactly once. (Without this,
+# job control is off and the bg job shares our process group, so it would get
+# BOTH the tty's SIGINT and our kill — a redundant double-signal racing the
+# shutdown.)
 # ---------------------------------------------------------------------------
+set -m
 "${rec_cmd[@]}" &
 rec_pid=$!
+set +m
 
 stop_recording() {
     # wf-recorder flushes and finalizes the mkv on SIGINT.
@@ -174,8 +182,13 @@ trap 'stop_recording' INT TERM
 ( while read -r key; do [[ "$key" == "q" ]] && { stop_recording; break; }; done ) &
 reader_pid=$!
 
-# Wait for the recorder to exit (whichever stop path fired).
-wait "$rec_pid" 2>/dev/null || true
+# Wait for the recorder to FULLY exit. A trapped Ctrl-C interrupts `wait` while
+# wf-recorder is still finalizing the mkv, so a single `wait` would return early
+# and we'd race post-processing against a half-written file. Loop until the
+# process is really gone.
+while kill -0 "$rec_pid" 2>/dev/null; do
+    wait "$rec_pid" 2>/dev/null || true
+done
 kill "$reader_pid" 2>/dev/null || true
 trap - INT TERM
 
@@ -186,15 +199,35 @@ fi
 echo ""
 echo "Recording stopped. Raw saved: $raw"
 
+# Scratch dir for the post-processing intermediates + ffmpeg logs.
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# Run ffmpeg quietly, but on failure print its captured output and bail with a
+# clear message instead of dying silently. The raw recording is always kept, so
+# nothing is lost — the user can fix the issue and re-run.
+run_ffmpeg() {
+    local log="$work/ffmpeg.log"
+    if ! ffmpeg "$@" >"$log" 2>&1; then
+        echo "" >&2
+        echo "ERROR: ffmpeg failed:" >&2
+        cat "$log" >&2
+        echo "" >&2
+        echo "Your raw recording is safe at: $raw" >&2
+        echo "Fix the issue and re-run, or process it by hand." >&2
+        exit 1
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Does the raw actually have an audio track? (No mic / muted source -> none.)
 # ---------------------------------------------------------------------------
 has_audio="$(ffprobe -v error -select_streams a -show_entries stream=index \
-    -of csv=p=0 "$raw" 2>/dev/null | head -n1)"
+    -of csv=p=0 "$raw" 2>/dev/null | head -n1)" || true
 
 if [[ -z "$has_audio" ]]; then
     echo "WARNING: no audio track in the recording — muxing video only." >&2
-    ffmpeg -y -i "$raw" -map 0:v:0 -c:v copy -movflags +faststart "$final" >/dev/null 2>&1
+    run_ffmpeg -y -i "$raw" -map 0:v:0 -c:v copy -movflags +faststart "$final"
     echo "Done -> $final"
     exit 0
 fi
@@ -204,18 +237,15 @@ fi
 # two-pass EBU R128 loudnorm on that fixed signal (RNNoise runs once; both passes
 # measure/apply against an identical signal). Same approach as make_videos.sh.
 # ---------------------------------------------------------------------------
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-
 clean="$work/clean.wav"
 echo "Cleaning mic (RNNoise denoise + EQ + compression)..."
-ffmpeg -y -i "$raw" -map 0:a:0 -af "$(voice_cleanup_chain)" \
-    -ar 48000 -ac 2 -c:a pcm_s16le "$clean" >/dev/null 2>&1
+run_ffmpeg -y -i "$raw" -map 0:a:0 -af "$(voice_cleanup_chain)" \
+    -ar 48000 -ac 2 -c:a pcm_s16le "$clean"
 
 echo "Measuring loudness (pass 1/2)..."
 measured="$(ffmpeg -hide_banner -i "$clean" \
     -af "loudnorm=I=${LOUDNORM_I}:TP=${LOUDNORM_TP}:LRA=${LOUDNORM_LRA}:print_format=json" \
-    -f null - 2>&1 | awk '/^\{/{c=1} c{print} /^\}/{c=0}')"
+    -f null - 2>&1 | awk '/^\{/{c=1} c{print} /^\}/{c=0}')" || true
 
 mi="$(awk -F'"' '/input_i/{print $4}' <<<"$measured")"
 mtp="$(awk -F'"' '/input_tp/{print $4}' <<<"$measured")"
@@ -229,7 +259,7 @@ fi
 
 norm="$work/audio_norm.wav"
 echo "Applying loudness (pass 2/2)..."
-ffmpeg -y -i "$clean" -af "$ln" -ar 48000 -ac 2 -c:a pcm_s16le "$norm" >/dev/null 2>&1
+run_ffmpeg -y -i "$clean" -af "$ln" -ar 48000 -ac 2 -c:a pcm_s16le "$norm"
 
 # ---------------------------------------------------------------------------
 # Remux: video copied (never re-encoded), cleaned audio encoded to AAC 320k,
@@ -237,11 +267,11 @@ ffmpeg -y -i "$clean" -af "$ln" -ar 48000 -ac 2 -c:a pcm_s16le "$norm" >/dev/nul
 # ---------------------------------------------------------------------------
 echo "Muxing (video copied, audio encoded)..."
 tmp_out="$work/final.mp4"
-ffmpeg -y -i "$raw" -i "$norm" \
+run_ffmpeg -y -i "$raw" -i "$norm" \
     -map 0:v:0 -map 1:a:0 \
     -c:v copy -c:a aac -b:a 320k -shortest \
     -movflags +faststart \
-    "$tmp_out" >/dev/null 2>&1
+    "$tmp_out"
 
 mv -f "$tmp_out" "$final"
 echo ""

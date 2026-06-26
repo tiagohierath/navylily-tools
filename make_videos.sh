@@ -7,9 +7,10 @@
 # as a static frame (no zoom, pan, or animation) and the first 30 seconds carry a
 # watermark set in a classic serif font (Garamond).
 #
-# The audio is used as-is — no processing at all (no denoise/EQ, compression, or
-# loudness normalization). Files are muxed at their original level; optional
-# background music is mixed subtly underneath.
+# The audio gets a single denoise filter (afftdn) to knock down steady mic hiss /
+# white noise, and nothing else — no EQ, compression, or loudness normalization.
+# It's otherwise at its original level; optional background music (left untouched)
+# is mixed subtly underneath.
 #
 # Layout (created automatically if missing):
 #   videos/audio/    -> input audio files (wav, mp3, m4a, flac, ...)
@@ -18,13 +19,14 @@
 #   videos/output/   -> generated videos land here
 #   videos/fonts/    -> bundled EBGaramond.ttf (serif watermark font)
 #
-# AUDIO is passed through untouched — no denoise/EQ, no compression, no loudness
-# normalization — so each file is muxed at its original level. VIDEO is
-# tuned for speed at the same visual quality: 1080p only (never 4k), static
-# frames (no zoom/pan/animation), and each frame encoded exactly ONCE (crf 17,
-# preset fast). Per-image clips are rendered straight to final quality with the
-# watermark baked in, then concatenated with -c copy and the audio muxed on top
-# (+faststart for streaming) — so nothing is ever re-encoded.
+# AUDIO gets only a single afftdn denoise pass (to remove steady mic hiss) — no
+# EQ, no compression, no loudness normalization — and is otherwise at its
+# original level. VIDEO is tuned for speed at the same visual quality: 1080p only
+# (never 4k), static frames (no zoom/pan/animation), and each frame encoded
+# exactly ONCE (crf 17, preset fast). Per-image clips are rendered straight to
+# final quality with the watermark baked in, then concatenated with -c copy and
+# the audio muxed on top (+faststart for streaming) — so nothing is ever
+# re-encoded.
 #
 # ── How to run on NixOS ──────────────────────────────────────────────────────
 #   The script needs ffmpeg + ffprobe. It does NOT install anything system-wide
@@ -102,6 +104,12 @@ FONTFILE="${FONTFILE:-}"
 OUTRO_IMAGE="${OUTRO_IMAGE:-$BASE_DIR/outro.png}"
 OUTRO_TEXT="${OUTRO_TEXT:-Navylily.tv}"
 OUTRO_SECONDS="${OUTRO_SECONDS:-3}"
+
+# Single denoise filter on the narration to knock down steady mic hiss / white
+# noise — afftdn (FFT denoiser). It's deliberately gentle so the voice itself is
+# untouched; nothing else is processed. Raise nf (noise floor, e.g. -20) for more
+# reduction, lower it (e.g. -40) for less, or set VOICE_DENOISE= empty to disable.
+VOICE_DENOISE="${VOICE_DENOISE:-afftdn=nr=12:nf=-25}"
 
 # ---------------------------------------------------------------------------
 # Make sure ffmpeg/ffprobe are available. Auto-wrap with nix's ffmpeg if not.
@@ -328,13 +336,16 @@ make_image_clip() {
 }
 
 # ---------------------------------------------------------------------------
-# Audio for the video: no processing at all. The source narration is just
-# transcoded to a consistent 48kHz stereo wav (so the mux has a uniform format
-# to work with) and used at its original level. Writes the wav to $2.
+# Audio for the video: the source narration is transcoded to a consistent 48kHz
+# stereo wav (so the mux has a uniform format to work with) and gets a single
+# afftdn denoise pass to remove steady mic hiss — nothing else is processed.
+# Set VOICE_DENOISE= empty to skip the denoise. Writes the wav to $2.
 # ---------------------------------------------------------------------------
 prepare_audio() {
     local in="$1" out="$2"
-    ffmpeg -y -i "$in" -ar 48000 -ac 2 -c:a pcm_s16le "$out" >/dev/null 2>&1
+    local af=()
+    [[ -n "$VOICE_DENOISE" ]] && af=(-af "$VOICE_DENOISE")
+    ffmpeg -y -i "$in" "${af[@]}" -ar 48000 -ac 2 -c:a pcm_s16le "$out" >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------

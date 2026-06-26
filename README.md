@@ -47,8 +47,9 @@ What it does:
 - Each image gets a **very subtle** zoom, randomly in or out, perfectly smooth
   (lossless intermediate clips, single quality-first final pass — `crf 17`,
   `preset veryslow`).
-- Audio is used **as-is — no processing** (no denoise/EQ, compression, or
-  loudness normalization); each file is muxed at its original level.
+- Audio gets **only a single `afftdn` denoise** pass to remove steady mic hiss /
+  white noise — no EQ, compression, or loudness normalization — and is otherwise
+  at its original level. Tune with `VOICE_DENOISE` (or set it empty to disable).
 - Drop tracks in `videos/music/` for an optional **very subtle background bed**:
   tracks are cycled across renders (each video starts on the next one) and
   looped to fill the timeline, then ducked ≈24 dB under the narration. Tune with

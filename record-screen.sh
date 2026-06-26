@@ -12,9 +12,10 @@
 #      your mic into the raw .mkv. In parallel pw-record captures the system
 #      output (default sink monitor) into a separate raw .wav.
 #   2. You stop it with Ctrl-C (or `q` + Enter); both captures finalize.
-#   3. AFTER recording, the audio is NOT processed at all — no denoise, EQ,
-#      highpass, compression or loudness normalization. Voice and system audio
-#      are used exactly as captured.
+#   3. AFTER recording, the only audio processing is a single afftdn denoise on
+#      the VOICE to remove steady mic hiss / white noise — no EQ, highpass,
+#      compression or loudness normalization. The system audio (music) is used
+#      exactly as captured.
 #   4. Mixes the music a bit UNDER the voice (SYS_GAIN_DB, normalize=0 so the
 #      voice stays at full level) and muxes over the video with -c:v copy (video
 #      is NEVER re-encoded) → videos/output/<name>.mp4 (+faststart). Raws kept.
@@ -78,9 +79,13 @@ SYS_GAIN_DB="${SYS_GAIN_DB:--8}"
 # Override the system-audio source (a PipeWire node name/id). Empty = the default
 # sink's monitor via pw-record's stream.capture.sink property.
 SYSTEM_AUDIO="${SYSTEM_AUDIO:-}"
-# The audio is NOT processed: no denoise, EQ, highpass, compression or loudness
-# normalization. Voice and system audio are used exactly as captured and only
-# mixed (the music ducked SYS_GAIN_DB under the voice).
+# The ONLY audio processing is a single denoise filter on the voice to knock down
+# steady mic hiss / white noise — afftdn (FFT denoiser), kept gentle so the voice
+# itself is untouched. No EQ, highpass, compression or loudness normalization;
+# the system audio (music) is used exactly as captured. Raise nf (noise floor,
+# e.g. -20) for more reduction, lower it (e.g. -40) for less, or set
+# VOICE_DENOISE= empty to disable.
+VOICE_DENOISE="${VOICE_DENOISE:-afftdn=nr=12:nf=-25}"
 
 # ---------------------------------------------------------------------------
 # Ensure wf-recorder + ffmpeg are available; re-exec inside nix's copies if not
@@ -297,11 +302,13 @@ if [[ -s "$sysraw" ]]; then
         -of csv=p=0 "$sysraw" 2>/dev/null | head -n1)" || true
 fi
 
-# ---- Voice: no processing — just extract the mic track to a uniform wav ------
+# ---- Voice: extract the mic track + a single afftdn denoise (mic hiss) -------
 if [[ -n "$has_mic" ]]; then
     voice_wav="$work/voice.wav"
-    echo "Extracting voice (no processing)..."
-    run_ffmpeg -y -i "$raw" -map 0:a:0 -ar 48000 -ac 2 -c:a pcm_s16le "$voice_wav"
+    voice_af=()
+    [[ -n "$VOICE_DENOISE" ]] && voice_af=(-af "$VOICE_DENOISE")
+    echo "Extracting voice$([[ -n "$VOICE_DENOISE" ]] && echo " (denoise: $VOICE_DENOISE)")..."
+    run_ffmpeg -y -i "$raw" -map 0:a:0 "${voice_af[@]}" -ar 48000 -ac 2 -c:a pcm_s16le "$voice_wav"
 else
     echo "No mic track in the recording — skipping voice." >&2
 fi

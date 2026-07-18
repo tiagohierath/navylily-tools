@@ -10,6 +10,9 @@ Small tools for the [navylily.tv](https://navylily.tv) workflow:
 2. **`make_videos.sh`** — turn audio + a folder of images into high-quality,
    YouTube-ready 4:3 1080p videos with a subtle, smooth 60fps zoom and a
    condensed-serif watermark.
+3. **`record_lessons.sh`** — narrate each navylily.tv wiki article into one
+   video from the terminal (light voice cleanup + `make_videos.sh`), auto-
+   detecting which articles you've already done. Feeds `youtube_upload.py`.
 
 Designed for a declarative/ephemeral NixOS machine: nothing is installed
 system-wide. The scripts fetch their dependencies (`ffmpeg`) into an ephemeral
@@ -63,6 +66,32 @@ What it does:
 
 The font is bundled (`videos/fonts/Cormorant.ttf`, OFL — see
 `videos/fonts/Cormorant-OFL.txt`).
+
+## 3. record_lessons.sh
+
+Record one video per wiki article, from the terminal:
+
+```bash
+./record_lessons.sh            # next un-recorded article
+./record_lessons.sh --list     # roster with [x]/[_] recorded marks
+./record_lessons.sh "maos"     # jump to / re-record one by title
+```
+
+Per lesson it opens the article in your browser to read aloud, records your mic
+(FIFINE via the pulse **default** source; press `q` to stop), then:
+
+- **Rejects** takes under `MIN_MINUTES` (6) or near-silent (muted/wrong mic).
+- **Light** voice cleanup only: `highpass=80, lowpass=14000, loudnorm` — no
+  denoise/EQ/compression, so the mic isn't over-processed. `CLEAN=full` uses the
+  heavier `audio-clean.sh`; `CLEAN=raw` does nothing.
+- Renders with `make_videos.sh` (its own denoise disabled to avoid double
+  processing) into `videos/output/`.
+
+The daily `youtube_upload.py` timer then posts one/day **private**, titled with
+the real article title, scheduled to go **public** after `YT_PUBLISH_AFTER_DAYS`
+(default 7) — a window to set the title + thumbnail. Recorded state is detected
+from disk (a `videos/audio/*.wav` or `videos/output/*.mp4`), so there's nothing
+to track by hand.
 
 ## License
 

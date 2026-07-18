@@ -1,37 +1,44 @@
 #!/usr/bin/env bash
 #
-# record-screen.sh — record the screen + mic (+ optional system/desktop audio)
+# record-screen.sh — record the screen + mic (+ opt-in system/desktop audio)
 # on Hyprland/Wayland, then mux the audio and produce a YouTube-ready .mp4.
-# Built for talking over song snippets: the audio is left UNPROCESSED and the
-# music simply sits a bit under your voice in the mix.
+# The audio is left UNPROCESSED; with SYSTEM=1 (for talking over song snippets)
+# the music simply sits a bit under your voice in the mix.
 # Post-the-output-file-straight-to-YouTube simple.
 #
 # What it does:
 #   1. Records the focused monitor with wf-recorder (wlroots screencopy), using
-#      Intel VAAPI hardware H.264 encoding so it's light on the CPU, capturing
-#      your mic into the raw .mkv. In parallel pw-record captures the system
-#      output (default sink monitor) into a separate raw .wav.
+#      Intel VAAPI hardware H.264 encoding (High profile, constant-QP — see
+#      VAAPI_QP) so it's light on the CPU, capturing your mic LOSSLESSLY (FLAC)
+#      into the raw .mkv. With SYSTEM=1, pw-record captures the system output
+#      (default sink monitor) in parallel into a separate raw .wav.
 #   2. You stop it with Ctrl-C (or `q` + Enter); both captures finalize.
 #   3. AFTER recording, the only audio processing is a single afftdn denoise on
 #      the VOICE to remove steady mic hiss / white noise — no EQ, highpass,
-#      compression or loudness normalization. The system audio (music) is used
-#      exactly as captured.
-#   4. Mixes the music a bit UNDER the voice (SYS_GAIN_DB, normalize=0 so the
-#      voice stays at full level) and muxes over the video with -c:v copy (video
-#      is NEVER re-encoded) → videos/output/<name>.mp4 (+faststart). Raws kept.
+#      compression or loudness normalization. With SYSTEM=1 the system audio
+#      (music) is used as captured, only time-ALIGNED: both captures stop
+#      together, so the mkv/wav duration difference is their start offset, and
+#      the music is trimmed/delayed by exactly that to line up with the video.
+#   4. Muxes over the video with -c:v copy (video is NEVER re-encoded) in a
+#      single ffmpeg pass → videos/output/<name>.mp4. With SYSTEM=1 the music
+#      is mixed a bit UNDER the voice (SYS_GAIN_DB, normalize=0 so the voice
+#      stays at full level), and an alimiter with level=false sits after the
+#      mix as a pure safety net: it only touches peaks where voice+music would
+#      sum past 0 dBFS and hard-clip. Raws kept.
 #
 # Output:
 #   videos/recordings/recording-<timestamp>.mkv          raw video+mic (kept)
-#   videos/recordings/recording-<timestamp>.system.wav   raw system audio (kept)
+#   videos/recordings/recording-<timestamp>.system.wav   raw system audio (kept, SYSTEM=1)
 #   videos/output/recording-<timestamp>.mp4              final, upload to YouTube
 #
 # Usage:
-#   ./record-screen.sh                 # record focused monitor + mic + system
+#   ./record-screen.sh                 # record focused monitor + mic
 #   ./record-screen.sh my-lesson       # name it -> ...my-lesson.mp4
 #   MONITOR=DP-1 ./record-screen.sh    # force a specific output
 #   MIC="alsa_input.usb-..." ./record-screen.sh   # force a specific mic source
-#   SYSTEM=0 ./record-screen.sh        # mic only, no system audio
+#   SYSTEM=1 ./record-screen.sh        # also capture system audio (music)
 #   SYS_GAIN_DB=-12 ./record-screen.sh # push the music further under the voice
+#   VAAPI_QP=18 ./record-screen.sh     # sharper text (lower QP = better/bigger)
 #
 # ── NixOS ────────────────────────────────────────────────────────────────────
 #   Needs wf-recorder + ffmpeg; system audio also needs
@@ -60,6 +67,10 @@ RAW_DIR="$BASE_DIR/recordings"         # raw mkv recordings (kept)
 # to fall back to software x264 (more CPU, but no GPU needed).
 VAAPI_DEVICE="${VAAPI_DEVICE:-/dev/dri/renderD128}"
 HWENC="${HWENC:-1}"
+# Constant-QP quality for the VAAPI encode; lower = sharper text, bigger file.
+# 20 keeps 1080p UI text crisp — the driver default picks Constrained Baseline
+# at a bitrate that's visibly soft for screen content.
+VAAPI_QP="${VAAPI_QP:-20}"
 
 # Monitor to capture (wf-recorder -o). Empty = auto-detect the focused output
 # via hyprctl. Override with MONITOR=DP-1 etc.
@@ -70,9 +81,10 @@ MONITOR="${MONITOR:-}"
 MIC="${MIC:-}"
 
 # ── System / desktop audio (e.g. song snippets you talk over) ────────────────
-# Captured separately with pw-record from the default sink's monitor, used
-# unprocessed and mixed a bit UNDER your voice.
-SYSTEM="${SYSTEM:-1}"               # 0 = mic only, no system audio
+# OFF by default — recordings are screen + mic only. SYSTEM=1 additionally
+# captures the default sink's monitor with pw-record, used unprocessed and
+# mixed a bit UNDER your voice.
+SYSTEM="${SYSTEM:-0}"               # 1 = also capture system audio
 # How far under the voice the music sits, in dB. "A bit lower" — present but
 # secondary; more negative = quieter music.
 SYS_GAIN_DB="${SYS_GAIN_DB:--8}"
@@ -103,7 +115,7 @@ if [[ "$_need_nix" == "1" ]]; then
         exec env -u LD_LIBRARY_PATH nix shell nixpkgs#wf-recorder nixpkgs#ffmpeg --command bash "$0" "$@"
     elif command -v nix-shell >/dev/null 2>&1; then
         echo "$_need_reason — re-executing inside nix-shell ..."
-        exec env -u LD_LIBRARY_PATH nix-shell -p wf-recorder ffmpeg --run "bash '$0' $*"
+        exec env -u LD_LIBRARY_PATH nix-shell -p wf-recorder ffmpeg --run "$(printf '%q ' bash "$0" "$@")"
     else
         echo "ERROR: $_need_reason, and nix is unavailable to fetch the tools." >&2
         exit 1
@@ -132,6 +144,7 @@ fi
 # ---------------------------------------------------------------------------
 ts="$(date +%Y%m%d-%H%M%S)"
 name="${1:-}"
+name="${name//\//-}"   # a "/" in the name is a path and would escape the recordings dir
 if [[ -n "$name" ]]; then
     name="recording-${ts}-${name}"
 else
@@ -173,13 +186,15 @@ run_ffmpeg() {
 # actually spin up an h264_vaapi encoder. On NixOS the Intel driver is often
 # missing (add intel-media-driver to hardware.graphics.extraPackages), and
 # trying to encode without it makes wf-recorder die outright — so probe with a
-# tiny throwaway encode first and fall back to software x264 instead of crashing.
+# tiny throwaway encode first (with the same profile/QP we record with) and
+# fall back to software x264 instead of crashing.
 use_vaapi=0
 if [[ "$HWENC" == "1" && -e "$VAAPI_DEVICE" ]]; then
     if ffmpeg -hide_banner -loglevel error -y \
             -vaapi_device "$VAAPI_DEVICE" \
             -f lavfi -i color=c=black:s=64x64:d=0.1 \
-            -vf 'format=nv12,hwupload' -c:v h264_vaapi -f null - >/dev/null 2>&1; then
+            -vf 'format=nv12,hwupload' -c:v h264_vaapi -profile:v high -qp "$VAAPI_QP" \
+            -f null - >/dev/null 2>&1; then
         use_vaapi=1
     else
         echo "WARNING: VAAPI hw encoding unavailable on $VAAPI_DEVICE (no working driver)" >&2
@@ -190,14 +205,22 @@ fi
 rec_cmd=(wf-recorder -f "$raw")
 [[ -n "$MONITOR" ]] && rec_cmd+=(-o "$MONITOR")
 if [[ "$use_vaapi" == "1" ]]; then
-    rec_cmd+=(-c h264_vaapi -d "$VAAPI_DEVICE")
+    # profile=high: the driver's default is Constrained Baseline, the weakest
+    # H.264 profile. qp: constant-quality mode so text stays sharp.
+    rec_cmd+=(-c h264_vaapi -d "$VAAPI_DEVICE" -p profile=high -p "qp=$VAAPI_QP")
+else
+    # veryfast keeps 1080p encoding realtime on a laptop CPU (default preset
+    # medium can drop frames).
+    rec_cmd+=(-c libx264 -p preset=veryfast -p crf=20)
 fi
-# Audio: -a with the source name, or bare -a for the default device.
+# Audio: -a with the source name, or bare -a for the default device. FLAC so
+# the raw mic is lossless and the final AAC is the voice's only lossy step.
 if [[ -n "$MIC" ]]; then
     rec_cmd+=(--audio="$MIC")
 else
     rec_cmd+=(-a)
 fi
+rec_cmd+=(--audio-codec=flac)
 
 # ---------------------------------------------------------------------------
 # Build the system-audio capture (pw-record from the default sink's monitor).
@@ -226,7 +249,7 @@ echo "================================================================"
 echo " Recording monitor : ${MONITOR:-<wf-recorder default>}"
 echo " Mic source        : ${MIC:-<default>}"
 echo " System audio      : $([[ "$capture_system" == "1" ]] && echo "${SYSTEM_AUDIO:-default sink monitor} (mixed ${SYS_GAIN_DB} dB under voice)" || echo "off")"
-echo " Encoder           : $([[ "$use_vaapi" == "1" ]] && echo "VAAPI h264 ($VAAPI_DEVICE)" || echo "software x264")"
+echo " Encoder           : $([[ "$use_vaapi" == "1" ]] && echo "VAAPI h264 ($VAAPI_DEVICE, qp $VAAPI_QP)" || echo "software x264 (crf 20)")"
 echo " Raw file          : $raw"
 echo " Final (YouTube)   : $final"
 echo "----------------------------------------------------------------"
@@ -243,8 +266,38 @@ echo "================================================================"
 # this, job control is off and the bg jobs share our process group, so they'd
 # get BOTH the tty's SIGINT and our kill — a redundant double-signal racing the
 # shutdown.)
+#
+# The trap is armed BEFORE the captures spawn: they outlive the script (own
+# process groups), so a Ctrl-C landing in the spawn window must not kill the
+# script and leave recorders running — and writing — forever with nothing to
+# stop them.
 # ---------------------------------------------------------------------------
 rec_pids=()
+
+stop_recording() {
+    # wf-recorder finalizes the mkv and pw-record closes the wav on SIGINT.
+    local p
+    for p in "${rec_pids[@]}"; do kill -INT "$p" 2>/dev/null || true; done
+}
+
+# First signal = clean stop. Further Ctrl-Cs while the captures finalize are
+# swallowed — a second SIGINT would cut wf-recorder's finalization short and
+# can truncate the mkv. A third is the escape hatch: force-kill.
+stop_count=0
+on_stop_signal() {
+    local p
+    stop_count=$((stop_count + 1))
+    if (( stop_count == 1 )); then
+        stop_recording
+        echo "" >&2
+        echo "Stopping — letting the captures finalize (Ctrl-C twice more to force-kill)..." >&2
+    elif (( stop_count >= 3 )); then
+        echo "Force-killing the captures — files may be truncated." >&2
+        for p in "${rec_pids[@]}"; do kill -KILL "$p" 2>/dev/null || true; done
+    fi
+}
+trap 'on_stop_signal' INT TERM
+
 set -m
 "${rec_cmd[@]}" &
 rec_pids+=("$!")
@@ -253,16 +306,16 @@ if [[ "$capture_system" == "1" ]]; then
     rec_pids+=("$!")
 fi
 set +m
+# A Ctrl-C that landed in the trap→spawn window ran the handler with no pids;
+# don't let it use up the "first signal = clean stop" slot.
+stop_count=0
 
-stop_recording() {
-    # wf-recorder finalizes the mkv and pw-record closes the wav on SIGINT.
-    local p
-    for p in "${rec_pids[@]}"; do kill -INT "$p" 2>/dev/null || true; done
-}
-trap 'stop_recording' INT TERM
-
-# Also allow stopping by typing q + Enter (handy if Ctrl-C is awkward).
-( while read -r key; do [[ "$key" == "q" ]] && { stop_recording; break; }; done ) &
+# Also allow stopping by typing q + Enter (handy if Ctrl-C is awkward). The
+# reader signals the script itself so every stop path goes through
+# on_stop_signal. The <&0 is load-bearing: with job control off, bash points a
+# background job's stdin at /dev/null, so without it the reader reads EOF
+# immediately and q would silently do nothing.
+( while read -r key; do [[ "$key" == "q" ]] && { kill -INT $$ 2>/dev/null; break; }; done ) <&0 &
 reader_pid=$!
 
 # Wait for every capture to FULLY exit. A trapped Ctrl-C interrupts `wait` while
@@ -288,12 +341,9 @@ echo "  raw video+mic : $raw"
 
 # ---------------------------------------------------------------------------
 # What audio did we actually capture?
-#   voice = mic track inside the mkv (wf-recorder)
+#   voice = mic track inside the mkv (wf-recorder, FLAC)
 #   music = system/desktop audio captured separately by pw-record
 # ---------------------------------------------------------------------------
-voice_wav=""
-music_wav=""
-
 has_mic="$(ffprobe -v error -select_streams a -show_entries stream=index \
     -of csv=p=0 "$raw" 2>/dev/null | head -n1)" || true
 has_sys=""
@@ -301,50 +351,75 @@ if [[ -s "$sysraw" ]]; then
     has_sys="$(ffprobe -v error -select_streams a -show_entries stream=index \
         -of csv=p=0 "$sysraw" 2>/dev/null | head -n1)" || true
 fi
+[[ -z "$has_mic" ]] && echo "No mic track in the recording — skipping voice." >&2
 
-# ---- Voice: extract the mic track + a single afftdn denoise (mic hiss) -------
-if [[ -n "$has_mic" ]]; then
-    voice_wav="$work/voice.wav"
-    voice_af=()
-    [[ -n "$VOICE_DENOISE" ]] && voice_af=(-af "$VOICE_DENOISE")
-    echo "Extracting voice$([[ -n "$VOICE_DENOISE" ]] && echo " (denoise: $VOICE_DENOISE)")..."
-    run_ffmpeg -y -i "$raw" -map 0:a:0 "${voice_af[@]}" -ar 48000 -ac 2 -c:a pcm_s16le "$voice_wav"
-else
-    echo "No mic track in the recording — skipping voice." >&2
-fi
-
-# ---- Music: no processing — just transcode the system capture to a uniform wav
+# ---- Time-align the music to the video ---------------------------------------
+# The captures START at slightly different moments (pw-record is usually rolling
+# 20–90 ms before wf-recorder's first frame) but STOP together, on the same
+# forwarded SIGINT — so the mkv/wav duration difference IS the start offset.
+#   wav longer  → music started earlier → trim that much off its head (-ss)
+#   wav shorter → music started later   → pad it with silence (adelay)
+# A difference over 1 s means a capture died early, not start skew; aligning on
+# it would shift the music wildly, so it's skipped with a warning.
+sys_in=(-i "$sysraw")
+music_delay=""    # music filter prefix, e.g. "adelay=57:all=1,"
 if [[ -n "$has_sys" ]]; then
-    music_wav="$work/music.wav"
-    echo "Extracting system audio (no processing)..."
-    run_ffmpeg -y -i "$sysraw" -ar 48000 -ac 2 -c:a pcm_s16le "$music_wav"
+    mkv_dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$raw" 2>/dev/null)" || true
+    sys_dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$sysraw" 2>/dev/null)" || true
+    if [[ -n "$mkv_dur" && -n "$sys_dur" ]]; then
+        off="$(awk -v w="$sys_dur" -v v="$mkv_dur" 'BEGIN{printf "%.3f", w - v}')"
+        if awk -v o="$off" 'BEGIN{exit !(o > 1 || o < -1)}'; then
+            echo "WARNING: video and system-audio durations differ by ${off}s —" >&2
+            echo "         a capture ended early; skipping start-offset alignment." >&2
+        elif awk -v o="$off" 'BEGIN{exit !(o >= 0.001)}'; then
+            sys_in=(-ss "$off" -i "$sysraw")
+            echo "Aligning music to video: trimming ${off}s of head (start offset)."
+        elif awk -v o="$off" 'BEGIN{exit !(o <= -0.001)}'; then
+            ms="$(awk -v o="$off" 'BEGIN{printf "%d", (-o * 1000) + 0.5}')"
+            music_delay="adelay=${ms}:all=1,"
+            echo "Aligning music to video: delaying it ${ms}ms (start offset)."
+        fi
+    fi
 fi
 
 # ---------------------------------------------------------------------------
-# Mux: video copied (never re-encoded), audio encoded to AAC 320k, +faststart.
-# When both voice and music are present, the music is ducked SYS_GAIN_DB under
-# the voice and amix runs with normalize=0 so the voice stays at full level.
-# -shortest trims to the (copied) video length.
+# Mux, single pass: video copied (never re-encoded); the audio is decoded,
+# filtered and encoded to AAC 320k in the same ffmpeg run — no intermediate
+# wavs. When both voice and music are present, the music is ducked SYS_GAIN_DB
+# under the voice and amix runs with normalize=0 so the voice stays at full
+# level. alimiter with level=false does no gain staging at all — it only
+# catches the peaks where voice + music would sum past 0 dBFS and hard-clip.
+# No -shortest: wf-recorder only emits frames on damage, so on a static screen
+# the last video frame can sit well before the audio ends, and -shortest would
+# throw away everything said after it. Players simply hold the final frame.
 # ---------------------------------------------------------------------------
 echo "Muxing (video copied, audio encoded)..."
 tmp_out="$work/final.mp4"
-if [[ -n "$voice_wav" && -n "$music_wav" ]]; then
+if [[ -n "$has_mic" && -n "$has_sys" ]]; then
+    [[ -n "$VOICE_DENOISE" ]] && echo "Denoising voice: $VOICE_DENOISE"
     sys_vol="$(awk -v g="$SYS_GAIN_DB" 'BEGIN{printf "%.6f", 10^(g/20)}')"
-    run_ffmpeg -y -i "$raw" -i "$voice_wav" -i "$music_wav" \
-        -filter_complex "[2:a]volume=${sys_vol}[m];[1:a][m]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0[a]" \
+    run_ffmpeg -y -i "$raw" "${sys_in[@]}" \
+        -filter_complex "[0:a:0]${VOICE_DENOISE:-anull}[v];[1:a]${music_delay}volume=${sys_vol}[m];[v][m]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.98:level=false[a]" \
         -map 0:v:0 -map "[a]" \
-        -c:v copy -c:a aac -b:a 320k -shortest -movflags +faststart "$tmp_out"
-elif [[ -n "$voice_wav" ]]; then
-    run_ffmpeg -y -i "$raw" -i "$voice_wav" \
-        -map 0:v:0 -map 1:a:0 \
-        -c:v copy -c:a aac -b:a 320k -shortest -movflags +faststart "$tmp_out"
-elif [[ -n "$music_wav" ]]; then
-    run_ffmpeg -y -i "$raw" -i "$music_wav" \
-        -map 0:v:0 -map 1:a:0 \
-        -c:v copy -c:a aac -b:a 320k -shortest -movflags +faststart "$tmp_out"
+        -c:v copy -c:a aac -b:a 320k "$tmp_out"
+elif [[ -n "$has_mic" ]]; then
+    voice_af=()
+    if [[ -n "$VOICE_DENOISE" ]]; then
+        voice_af=(-af "$VOICE_DENOISE")
+        echo "Denoising voice: $VOICE_DENOISE"
+    fi
+    run_ffmpeg -y -i "$raw" \
+        -map 0:v:0 -map 0:a:0 "${voice_af[@]}" \
+        -c:v copy -c:a aac -b:a 320k "$tmp_out"
+elif [[ -n "$has_sys" ]]; then
+    music_af=()
+    [[ -n "$music_delay" ]] && music_af=(-af "${music_delay%,}")
+    run_ffmpeg -y -i "$raw" "${sys_in[@]}" \
+        -map 0:v:0 -map 1:a:0 "${music_af[@]}" \
+        -c:v copy -c:a aac -b:a 320k "$tmp_out"
 else
     echo "WARNING: no usable audio — muxing video only." >&2
-    run_ffmpeg -y -i "$raw" -map 0:v:0 -c:v copy -movflags +faststart "$tmp_out"
+    run_ffmpeg -y -i "$raw" -map 0:v:0 -c:v copy "$tmp_out"
 fi
 
 mv -f "$tmp_out" "$final"

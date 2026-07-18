@@ -12,6 +12,8 @@ state.json
 videos/audio/
 videos/images/
 videos/output/
+videos/recordings/
+videos/render.log
 *.mp4
 *.mov
 *.mkv

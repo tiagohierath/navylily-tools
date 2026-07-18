@@ -9,19 +9,19 @@ thumbnail and publish manually later.
 It is built to be *physically incapable* of over-posting, with three
 independent safety mechanisms (any one of them alone stops a bad run):
 
-  1. Persistent daily state  — a JSON state file records the date of the last
+  1. Persistent daily state, a JSON state file records the date of the last
      upload and which files have already been uploaded. If today already has an
      upload (or the per-upload cooldown hasn't elapsed), the run exits at once.
 
-  2. Hard single-item rule   — each run selects exactly ONE video and uploads
+  2. Hard single-item rule, each run selects exactly ONE video and uploads
      only that one. There is no batch/loop over the folder in live mode. Leftover
      videos simply wait for the next scheduled run.
 
-  3. Run lock                — an exclusive flock is taken before doing anything.
+  3. Run lock, an exclusive flock is taken before doing anything.
      If another instance (cron overlap, retry, manual mistake) is already
      running, this one exits immediately.
 
-Plus: a file is never uploaded twice — every successful upload is appended to
+Plus: a file is never uploaded twice, every successful upload is appended to
 the state's "uploaded" list (keyed by content hash + name), and such files are
 skipped forever.
 
@@ -38,7 +38,7 @@ Usage:
 
 Scheduling (6pm America/Sao_Paulo, once a day) is handled outside this script;
 see install_timer.sh / the README. The script itself does not trust the
-scheduler — the guards above hold even if it's triggered 20 times.
+scheduler, the guards above hold even if it's triggered 20 times.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# CONFIG — override any of these with environment variables.
+# CONFIG, override any of these with environment variables.
 # ---------------------------------------------------------------------------
 HOME = Path.home()
 DEFAULT_STATE_DIR = HOME / ".local" / "state" / "navylily-youtube"
@@ -177,13 +177,6 @@ def already_uploaded_keys(state: dict) -> set[str]:
     return {e["key"] for e in state.get("uploaded", []) if "key" in e}
 
 
-def claimed_keys(state: dict) -> set[str]:
-    """Keys of every file an upload was ever *started* for. A file lands here
-    before its API call, so even if that run dies mid-upload the file is never
-    selected again — a crash becomes 'skip this one', never 'post it twice'."""
-    return {e["key"] for e in state.get("claimed", []) if "key" in e}
-
-
 def cooldown_remaining(state: dict) -> float:
     """Hours still to wait before another upload is permitted (0 if allowed)."""
     last = state.get("last_upload_iso")
@@ -213,7 +206,7 @@ def uploaded_today(state: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Selection — exactly one not-yet-uploaded video, oldest first.
+# Selection, exactly one not-yet-uploaded video, oldest first.
 # ---------------------------------------------------------------------------
 def pick_video(state: dict) -> Path | None:
     done = already_uploaded_keys(state)
@@ -235,7 +228,7 @@ def title_for(video: Path) -> str:
     """Real title for a video, if the recorder left one next to it.
 
     The lesson recorder writes a sidecar '<name>.title.txt' holding the exact
-    wiki article title. If present (and non-empty) we use it — trimmed to
+    wiki article title. If present (and non-empty) we use it, trimmed to
     YouTube's 100-char limit. Otherwise we fall back to a neutral random title,
     so this stays a drop-in for the old random-title behaviour."""
     sidecar = video.with_suffix(".title.txt")
@@ -313,7 +306,7 @@ def upload(service, path: Path, title: str) -> str:
     }
     # publishAt only takes effect on a private video: YouTube keeps it private
     # until this instant, then makes it public automatically. Must be RFC 3339 /
-    # ISO 8601 in UTC — an aware UTC datetime's isoformat() is exactly that.
+    # ISO 8601 in UTC, an aware UTC datetime's isoformat() is exactly that.
     if PUBLISH_AFTER_DAYS > 0:
         publish_at = (dt.datetime.now(dt.timezone.utc)
                       + dt.timedelta(days=PUBLISH_AFTER_DAYS)).replace(microsecond=0)
@@ -350,7 +343,7 @@ def upload(service, path: Path, title: str) -> str:
         except RETRIABLE_EXCEPTIONS as e:
             err = f"retriable transport error: {e}"
         else:
-            continue  # no error this chunk — keep going (or finish)
+            continue  # no error this chunk, keep going (or finish)
 
         retry += 1
         if retry > MAX_RETRIES:
@@ -384,7 +377,7 @@ def main() -> int:
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        print("Another upload run is already in progress — exiting.")
+        print("Another upload run is already in progress, exiting.")
         return 0
 
     state = load_state()
@@ -396,6 +389,7 @@ def main() -> int:
             "uploaded_today": uploaded_today(state),
             "cooldown_remaining_h": round(cooldown_remaining(state), 2),
             "uploaded_count": len(state.get("uploaded", [])),
+            "publish_after_days": PUBLISH_AFTER_DAYS,
             "output_dir": str(OUTPUT_DIR),
         }, indent=2, ensure_ascii=False))
         return 0
@@ -407,24 +401,26 @@ def main() -> int:
 
     # ---- Safety #1: persistent daily / cooldown state. --------------------
     if uploaded_today(state):
-        print("Already uploaded today — exiting (hard daily cap).")
+        print("Already uploaded today, exiting (hard daily cap).")
         return 0
     remaining = cooldown_remaining(state)
     if remaining > 0:
-        print(f"Cooldown active: {remaining:.1f}h left before next upload — "
+        print(f"Cooldown active: {remaining:.1f}h left before next upload, "
               "exiting.")
         return 0
 
     # ---- Safety #2: select exactly one video. -----------------------------
     video = pick_video(state)
     if video is None:
-        print("No new (not-yet-uploaded) videos in output folder — nothing "
+        print("No new (not-yet-uploaded) videos in output folder, nothing "
               "to do.")
         return 0
 
     title = title_for(video)
+    sched = (f"private, auto-public in {PUBLISH_AFTER_DAYS:g}d"
+             if PUBLISH_AFTER_DAYS > 0 else "private")
     print(f"Selected: {video.name}")
-    print(f"Title:    {title}  (private)")
+    print(f"Title:    {title}  ({sched})")
 
     if args.dry_run:
         print("[dry-run] would upload the above; state NOT modified.")
@@ -435,7 +431,7 @@ def main() -> int:
     url = f"https://youtu.be/{video_id}"
     print(f"Uploaded (private): {url}")
 
-    # Record success — date stamp (caps the day) + file identity (never twice).
+    # Record success, date stamp (caps the day) + file identity (never twice).
     state["last_upload_iso"] = now_local().isoformat()
     state.setdefault("uploaded", []).append({
         "key": file_key(video),

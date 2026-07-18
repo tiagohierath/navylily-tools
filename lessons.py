@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-lessons.py — helper for record_lessons.sh.
+lessons.py, helper for record_lessons.sh.
 
 Knows how to enumerate the Navy Lily wiki articles, work out which ones have
 already been recorded, extract the exact article title, turn a title into a
@@ -9,14 +9,17 @@ open in the browser while you narrate.
 
 It writes NOTHING permanent except the temp HTML page it renders; all the
 "has this been recorded?" state is derived from the files on disk (an audio wav
-in AUDIO_DIR or a finished mp4 in OUTPUT_DIR), so there is no state file to drift.
+in AUDIO_DIR or a finished mp4 in OUTPUT_DIR), so there is no state file to
+drift.
 
-Subcommands (all paths come from env: WIKI_DIR, AUDIO_DIR, OUTPUT_DIR):
+Subcommands (paths come from env: WIKI_DIR, AUDIO_DIR, OUTPUT_DIR):
   next [search]   Pick a lesson and print a TAB-separated line:
                       slug <TAB> title <TAB> md_path <TAB> html_path
-                  With no search: the first not-yet-recorded lesson (wiki order).
+                  With no search: the first not-yet-recorded lesson (wiki
+                  order), minus any slugs in $SKIP_SLUGS (space separated,
+                  the recorder's per-session skip list).
                   With a search: the first lesson whose title/slug/filename
-                  matches (recorded or not — used to re-record one on purpose).
+                  matches, recorded or not (used to re-record one on purpose).
                   Exit code 3 (and no output) when there is nothing to pick.
   list            Print every lesson as:  [x|_] <TAB> slug <TAB> title
   slug <title>    Print the slug for a title (utility).
@@ -50,12 +53,13 @@ def slugify(s: str) -> str:
 
 
 def article_title(md: Path) -> str:
-    """The article's display title: its first '# ' heading, else the filename."""
+    """The article's display title: its first '# ' heading, else the filename.
+    Whitespace is collapsed so the recorder's TAB-separated output stays safe."""
     try:
         for line in md.read_text(encoding="utf-8").splitlines():
             m = re.match(r"^#\s+(.+?)\s*$", line)
             if m:
-                return m.group(1).strip()
+                return re.sub(r"\s+", " ", m.group(1)).strip()
     except OSError:
         pass
     return md.stem
@@ -64,8 +68,8 @@ def article_title(md: Path) -> str:
 class Lesson:
     def __init__(self, md: Path):
         self.md = md
-        # Slug is derived from the FILENAME (guaranteed unique across the wiki),
-        # so two articles can never collide on their output name. The title we
+        # Slug is derived from the FILENAME (unique across the wiki), so two
+        # articles can never collide on their output name. The title we
         # show/publish is the nicer in-file heading.
         self.slug = slugify(md.stem)
         self.title = article_title(md)
@@ -79,14 +83,27 @@ class Lesson:
 def all_lessons() -> list[Lesson]:
     if not WIKI_DIR.is_dir():
         sys.exit(f"WIKI_DIR does not exist: {WIKI_DIR}")
-    return [Lesson(p) for p in sorted(WIKI_DIR.glob("*.md"))]
+    lessons = [Lesson(p) for p in sorted(WIKI_DIR.glob("*.md"))]
+    # Two filenames melting into one slug would make the second lesson look
+    # recorded the moment the first is done. Refuse loudly instead.
+    by_slug: dict[str, list[str]] = {}
+    for L in lessons:
+        by_slug.setdefault(L.slug, []).append(L.md.name)
+    dups = {s: names for s, names in by_slug.items() if len(names) > 1}
+    if dups:
+        pairs = "; ".join(f"{s} <- {', '.join(n)}" for s, n in dups.items())
+        sys.exit(f"slug collision, rename one file of each pair: {pairs}")
+    return lessons
 
 
 # ---------------------------------------------------------------------------
-# Minimal, forgiving Markdown -> HTML, tuned for reading a single article aloud.
+# Minimal, forgiving Markdown -> HTML, tuned for reading one article aloud.
 # ---------------------------------------------------------------------------
 def inline(text: str) -> str:
     text = html.escape(text)
+    # Images are useless while narrating; links read as their text only.
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
     text = re.sub(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)", r"<em>\1</em>", text)
     return text
@@ -96,7 +113,7 @@ def render_html(lesson: Lesson) -> str:
     raw = lesson.md.read_text(encoding="utf-8")
     lines = raw.splitlines()
 
-    # The wiki convention is: an optional category on line 1, then the '# Title'.
+    # The wiki convention: an optional category on line 1, then the '# Title'.
     category = ""
     body_start = 0
     for i, line in enumerate(lines):
@@ -146,7 +163,7 @@ def render_html(lesson: Lesson) -> str:
     return f"""<!doctype html>
 <html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(lesson.title)} — gravar</title>
+<title>{html.escape(lesson.title)} (gravar)</title>
 <style>
   :root {{ color-scheme: light dark; }}
   body {{ font-family: Georgia, "Times New Roman", serif; line-height: 1.75;
@@ -170,7 +187,7 @@ def render_html(lesson: Lesson) -> str:
   {kicker}
   <h1>{html.escape(lesson.title)}</h1>
   {body}
-  <div class="rec-note">● Gravando pelo terminal — pressione <b>q</b> no ffmpeg para parar</div>
+  <div class="rec-note">Leia e narre. A gravação roda no terminal (pressione <b>q</b> para parar)</div>
 </body></html>"""
 
 
@@ -182,8 +199,9 @@ def pick_next(search: str | None) -> Lesson | None:
             if q in L.title.lower() or q in L.slug or q in L.md.stem.lower():
                 return L
         return None
+    skip = set(os.environ.get("SKIP_SLUGS", "").split())
     for L in lessons:
-        if not L.recorded:
+        if not L.recorded and L.slug not in skip:
             return L
     return None
 

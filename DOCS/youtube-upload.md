@@ -1,9 +1,17 @@
 # youtube_upload.py (run via youtube_upload.sh)
 
 Uploads **exactly one** video per run from `videos/output/` to YouTube as a
-**private** video with a random working title — so you set the real title +
-thumbnail and publish manually later. Built to be physically incapable of
-over-posting.
+**private** video. Built to be physically incapable of over-posting.
+
+Titles: if a sidecar `<video>.title.txt` sits next to the mp4 (written by
+`record_lessons.sh`) the upload uses that exact wiki title; otherwise it falls
+back to a random working title you replace later.
+
+Publishing: every upload is scheduled with `publishAt` = now +
+`YT_PUBLISH_AFTER_DAYS` days (default 7, `0` disables). The video stays private
+for that window, you set title + thumbnail in YouTube Studio, then YouTube
+flips it public automatically. The clock starts at UPLOAD time, not recording
+time.
 
 ## The three guards (any one alone stops a bad run)
 

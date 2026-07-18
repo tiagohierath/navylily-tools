@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# install_timer.sh — install a *user* systemd timer that runs the uploader
+# install_timer.sh, install a *user* systemd timer that runs the uploader
 # once a day at 18:00 America/Sao_Paulo, posting one private video if any are
 # waiting. Designed to be fully hands-off: install once and forget.
 #
@@ -33,18 +33,23 @@ mkdir -p "$UNIT_DIR"
 # session environment, and give the upload plenty of time on a slow link.
 cat > "$SERVICE" <<EOF
 [Unit]
-Description=Navylily — upload one video to YouTube (private)
+Description=Navylily, upload one video to YouTube (private)
 # Best-effort wait for the network; the uploader also retries internally.
 After=network-online.target
 Wants=network-online.target
+# A couple of retries, then stop until the next day's timer fire. Without this
+# cap, Restart=on-failure would retry every 5 minutes forever on a persistent
+# failure (revoked token, exhausted quota).
+StartLimitIntervalSec=6h
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
 Environment=PATH=/run/wrappers/bin:/etc/profiles/per-user/%u/bin:/run/current-system/sw/bin:/usr/bin:/bin
 ExecStart=$HERE/youtube_upload.sh
 TimeoutStartSec=30min
-# One clean retry a few minutes later if the whole run failed (e.g. no network
-# yet). The daily cap + Persistent still prevent any double-post.
+# Retry after a short wait if the run failed (e.g. network not up yet). The
+# daily cap + content-hash state still prevent any double-post.
 Restart=on-failure
 RestartSec=5min
 EOF
@@ -52,7 +57,7 @@ EOF
 # OnCalendar honours the timezone you name explicitly (systemd >= 252).
 cat > "$TIMER" <<EOF
 [Unit]
-Description=Navylily YouTube upload — daily 18:00 America/Sao_Paulo
+Description=Navylily YouTube upload, daily 18:00 America/Sao_Paulo
 
 [Timer]
 OnCalendar=*-*-* 18:00:00 America/Sao_Paulo

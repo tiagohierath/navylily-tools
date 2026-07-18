@@ -88,7 +88,7 @@ REST_MAX_SECONDS=20
 #   Set MUSIC=0 to disable, or raise MUSIC_GAIN_DB toward 0 to bring it forward.
 MUSIC="${MUSIC:-1}"
 MUSIC_GAIN_DB="${MUSIC_GAIN_DB:--24}"  # duck the bed this far under the voice
-MUSIC_ROTATION=0                 # which track the NEXT video starts on (cycles)
+MUSIC_ROTATION="${MUSIC_ROTATION:-0}"   # track the NEXT video starts on (cycles; env overridable so single-video callers can still vary it)
 
 WATERMARK_TEXT="Aulas completas em navylily.tv"
 WATERMARK_SECONDS=30
@@ -109,7 +109,10 @@ OUTRO_SECONDS="${OUTRO_SECONDS:-3}"
 # noise — afftdn (FFT denoiser). It's deliberately gentle so the voice itself is
 # untouched; nothing else is processed. Raise nf (noise floor, e.g. -20) for more
 # reduction, lower it (e.g. -40) for less, or set VOICE_DENOISE= empty to disable.
-VOICE_DENOISE="${VOICE_DENOISE:-afftdn=nr=12:nf=-25}"
+# NOTE: no colon in the expansion. ${VOICE_DENOISE-...} keeps a set-but-empty
+# value empty (denoise disabled, as documented above); ${VOICE_DENOISE:-...}
+# would silently re-enable the default when callers pass VOICE_DENOISE=.
+VOICE_DENOISE="${VOICE_DENOISE-afftdn=nr=12:nf=-25}"
 
 # ---------------------------------------------------------------------------
 # Make sure ffmpeg/ffprobe are available. Auto-wrap with nix's ffmpeg if not.
@@ -485,9 +488,13 @@ for audio in "${audio_files[@]}"; do
             "$tmp_out" >/dev/null 2>&1
     fi
 
-    # Atomic publish so an interrupted run never leaves a half-written .mp4
-    # that the skip-check would mistake for a finished render.
-    mv -f "$tmp_out" "$out_video"
+    # Publish in two steps: WORK_DIR usually lives on another filesystem
+    # (/tmp), where a direct mv degrades to a non-atomic copy that the daily
+    # uploader could catch half-written. Stage the copy next to the final name,
+    # then rename inside the same directory, which IS atomic. The .partial
+    # suffix is not a video extension, so the uploader never selects it.
+    cp "$tmp_out" "${out_video}.partial"
+    mv -f "${out_video}.partial" "$out_video"
     echo "  done -> $out_video"
 done
 

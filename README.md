@@ -1,5 +1,7 @@
 # navylily-tools
 
+Just stuff, disposable uhh scripts i use for my youtube channel, to record, edit, post videos, etc, mostly bash scripts or python
+
 Small tools for the [navylily.tv](https://navylily.tv) workflow:
 
 1. **`audio-clean.sh`** — clean a raw mic recording (RNNoise denoise + EQ +

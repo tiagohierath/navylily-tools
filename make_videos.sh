@@ -217,16 +217,26 @@ fi
 if [[ $# -ge 1 ]]; then
     filter="$1"
     filtered=()
+    exact=()
     for a in "${audio_files[@]}"; do
-        [[ "$(basename "$a")" == *"$filter"* ]] && filtered+=("$a")
+        b="$(basename "$a")"
+        [[ "$b" == *"$filter"* ]] && filtered+=("$a")
+        [[ "${b%.*}" == "$filter" ]] && exact+=("$a")
     done
-    if [[ ${#filtered[@]} -eq 0 ]]; then
+    # An exact basename (minus extension) wins over a substring match, so the
+    # recorder rendering slug "mao" renders ONLY mao.wav and never also sweeps
+    # in "maos.wav" (mão/mãos). A fragment that matches nothing exactly still
+    # falls back to substring, so ad-hoc `./make_videos.sh bitcoin` still works.
+    if [[ ${#exact[@]} -gt 0 ]]; then
+        audio_files=("${exact[@]}")
+    elif [[ ${#filtered[@]} -gt 0 ]]; then
+        audio_files=("${filtered[@]}")
+    else
         echo "No audio file in $AUDIO_DIR matches '$filter'." >&2
         echo "Available:" >&2
         printf '  %s\n' "${audio_files[@]##*/}" >&2
         exit 1
     fi
-    audio_files=("${filtered[@]}")
 fi
 if [[ ${#image_files[@]} -eq 0 ]]; then
     echo "No image files found in $IMAGES_DIR. Drop some in and re-run." >&2

@@ -158,36 +158,29 @@ def render_html(lesson: Lesson) -> str:
         buf.append(s)
     flush(); flush_list()
 
-    kicker = f'<div class="kicker">{html.escape(category)}</div>' if category else ""
+    # Minimal reading page: just the script (title + the whole article body),
+    # clean serif typography sized for reading aloud. No category kicker, no
+    # instructional bar — nothing but the words you narrate.
     body = "\n".join(blocks)
     return f"""<!doctype html>
 <html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(lesson.title)} (gravar)</title>
+<title>{html.escape(lesson.title)}</title>
 <style>
   :root {{ color-scheme: light dark; }}
   body {{ font-family: Georgia, "Times New Roman", serif; line-height: 1.75;
-         max-width: 42rem; margin: 0 auto; padding: 3rem 1.5rem 6rem;
+         max-width: 42rem; margin: 0 auto; padding: 3rem 1.5rem 5rem;
          font-size: 1.35rem; }}
-  .kicker {{ font-family: system-ui, sans-serif; text-transform: uppercase;
-            letter-spacing: .12em; font-size: .8rem; opacity: .6;
-            margin-bottom: .5rem; }}
   h1 {{ font-size: 2.3rem; line-height: 1.15; margin: 0 0 1.5rem; }}
   h2 {{ font-size: 1.6rem; margin: 2rem 0 .6rem; }}
   h3 {{ font-size: 1.3rem; margin: 1.6rem 0 .5rem; }}
   p {{ margin: 0 0 1.15rem; }}
   ul {{ margin: 0 0 1.15rem 1.2rem; }}
   li {{ margin: 0 0 .4rem; }}
-  .rec-note {{ position: fixed; bottom: 0; left: 0; right: 0;
-             font-family: system-ui, sans-serif; font-size: .9rem;
-             text-align: center; padding: .7rem; background: #b91c1c;
-             color: #fff; }}
 </style></head>
 <body>
-  {kicker}
   <h1>{html.escape(lesson.title)}</h1>
   {body}
-  <div class="rec-note">Leia e narre. A gravação roda no terminal (pressione <b>q</b> para parar)</div>
 </body></html>"""
 
 
@@ -230,6 +223,16 @@ def main(argv: list[str]) -> int:
             mark = "x" if L.recorded else "_"
             print(f"[{mark}]\t{L.slug}\t{L.title}")
         print(f"\n{done}/{len(lessons)} recorded", file=sys.stderr)
+        return 0
+
+    if cmd == "count":
+        # For the recorder's progress bar: "<total>\t<recorded>". Note the
+        # recorder ADDS its own just-committed takes on top of this, because a
+        # take's on-disk marker (the wav) is written by a background job that may
+        # not have run yet when this is queried.
+        lessons = all_lessons()
+        done = sum(1 for L in lessons if L.recorded)
+        print(f"{len(lessons)}\t{done}")
         return 0
 
     if cmd == "slug":

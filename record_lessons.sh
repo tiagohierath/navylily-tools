@@ -142,6 +142,53 @@ notify() {
     command -v notify-send >/dev/null 2>&1 && notify-send "$1" "$2" >/dev/null 2>&1 || true
 }
 
+# --- Render freeze: the mic owns the machine while it's actually capturing. ---
+# Each background render is launched in its OWN process group (see `set -m` at
+# the launch site), so a single signal freezes the whole job — the subshell AND
+# the ffmpeg/x264 children it spawns. While a take is recording we SIGSTOP every
+# render (zero cpu, so it can NEVER cause a capture xrun / dropout in your take),
+# then SIGCONT the instant recording stops. Renders only advance in the gaps
+# between takes: slower renders, but a recording in progress is never at risk.
+# (The nice/ionice on each job is a second layer for when renders do run.)
+RENDER_PIDS=()
+
+freeze_renders() {
+    (( ${#RENDER_PIDS[@]} )) || return 0
+    local p
+    for p in "${RENDER_PIDS[@]}"; do kill -STOP -"$p" 2>/dev/null || true; done
+}
+
+thaw_renders() {
+    (( ${#RENDER_PIDS[@]} )) || return 0
+    local p live=()
+    for p in "${RENDER_PIDS[@]}"; do
+        kill -CONT -"$p" 2>/dev/null || true
+        kill -0 -"$p" 2>/dev/null && live+=("$p")   # drop groups that finished
+    done
+    RENDER_PIDS=("${live[@]}")
+}
+
+# --- Progress bar over the whole wiki roster. --------------------------------
+# TOTAL_LESSONS / BASE_DONE are read once at startup; DONE_THIS_SESSION counts
+# takes committed in this run (their wav marker lands later, in the background,
+# so we can't re-derive it from disk without a race). Bar = base + session.
+TOTAL_LESSONS=0
+BASE_DONE=0
+DONE_THIS_SESSION=0
+
+repeat() { local i out=""; for ((i=0; i<$2; i++)); do out+="$1"; done; printf '%s' "$out"; }
+
+progress_bar() {
+    (( TOTAL_LESSONS > 0 )) || return 0
+    local done=$(( BASE_DONE + DONE_THIS_SESSION )) width=28
+    (( done > TOTAL_LESSONS )) && done=$TOTAL_LESSONS
+    local filled=$(( done * width / TOTAL_LESSONS ))
+    local pct=$(( done * 100 / TOTAL_LESSONS ))
+    printf '  Wiki  [%s%s]  %d/%d lessons  (%d%%)\n' \
+        "$(repeat '█' "$filled")" "$(repeat '░' $(( width - filled )))" \
+        "$done" "$TOTAL_LESSONS" "$pct"
+}
+
 # --- --list just prints the roster and exits. --------------------------------
 if [[ "${1:-}" == "--list" || "${1:-}" == "-l" ]]; then
     py list
@@ -160,14 +207,20 @@ fi
 
 SEARCH="${1:-}"
 
-echo "Navy Lily lesson recorder"
-echo "  mic:        $MIC   (override with MIC=...)"
-echo "  min length: ${MIN_MINUTES} min   (shorter takes are discarded)"
-echo "  clean:      $CLEAN"
-echo "  output:     $OUTPUT_DIR"
-systemctl --user is-active navylily-youtube.timer >/dev/null 2>&1 \
-    || echo "  NOTE: posting timer not active. Videos will queue but not post." \
-       "Arm it with ./youtube_upload.sh --authorize (once) + ./install_timer.sh"
+# Roster counts for the progress bar (best-effort; stays 0/hidden on any error).
+if counts="$(py count 2>/dev/null)"; then
+    IFS=$'\t' read -r TOTAL_LESSONS BASE_DONE <<<"$counts"
+fi
+
+echo "Navy Lily · lesson recorder"
+progress_bar
+echo "  mic $MIC · min ${MIN_MINUTES}m · clean $CLEAN"
+if systemctl --user is-active navylily-youtube.timer >/dev/null 2>&1; then
+    echo "  posting  ✓ on — auto-posts PRIVATE, 1/day, public after 7 days"
+else
+    echo "  posting  ✗ OFF — takes will render + queue but NOT post"
+    echo "           arm once: ./youtube_upload.sh --authorize && ./install_timer.sh"
+fi
 echo
 
 while :; do
@@ -185,8 +238,7 @@ while :; do
             [[ "$a" =~ ^[Yy] ]] || continue
         fi
         echo "────────────────────────────────────────────────────────"
-        echo "Video:  $title"
-        echo "Slug:   $slug"
+        echo "▶ Video:  $title"
         echo
     else
     # Pick the lesson: the search term (if any) on the first pass, then always
@@ -207,9 +259,9 @@ while :; do
     IFS=$'\t' read -r slug title md_path html_path <<<"$line"
 
     echo "────────────────────────────────────────────────────────"
-    echo "Lesson:  $title"
-    echo "Slug:    $slug"
-    echo "Article: opening in your browser to read while you speak…"
+    progress_bar
+    echo "▶ Lesson:  $title"
+    echo "  script opened in your browser — read it aloud while you record"
     open_in_browser "file://$html_path"
     echo
     fi
@@ -217,12 +269,35 @@ while :; do
     raw="$RAW_DIR/${slug}.raw.wav"
 
     while :; do
-        read -r -p "Press ENTER to START recording (then press 'q' in ffmpeg to stop)… " _ || exit 0
-        echo "● Recording. Speak now; press 'q' to stop."
+        read -r -p "Press ENTER to start recording… " _ || exit 0
+        # Freeze any in-flight render so the capture has the whole CPU (no
+        # xruns), and thaw it the moment recording stops — even if ffmpeg errors.
+        freeze_renders
+        # Live elapsed timer (background) so you know when to stop: it flips to
+        # "past minimum" the moment the take clears MIN_MINUTES. ffmpeg runs
+        # SILENT (-nostats) in the foreground so it still reads 'q' from stdin to
+        # stop, and our timer is the only line moving on screen.
+        (
+            start=$SECONDS
+            while :; do
+                e=$(( SECONDS - start ))
+                if (( e >= MIN_SECONDS )); then
+                    printf '\r  ● REC  %s   ✓ past %smin — press q to stop      ' "$(fmt_mmss "$e")" "$MIN_MINUTES"
+                else
+                    printf '\r  ● REC  %s   need %smin, keep going…             ' "$(fmt_mmss "$e")" "$MIN_MINUTES"
+                fi
+                sleep 1
+            done
+        ) &
+        ticker=$!
         # -c:a pcm_s16le so the wave module can read the header for the length
         # check; -ac 1 mono voice; pulse default mic. 'q' on stdin stops cleanly.
-        "${FFMPEG[@]}" -hide_banner -f pulse -i "$MIC" \
+        "${FFMPEG[@]}" -hide_banner -loglevel error -nostats -f pulse -i "$MIC" \
             -ac 1 -ar 48000 -c:a pcm_s16le -y "$raw" || true
+        kill "$ticker" 2>/dev/null || true
+        wait "$ticker" 2>/dev/null || true
+        printf '\n'
+        thaw_renders
 
         [[ -f "$raw" ]] || { echo "No audio captured. Let's try again."; continue; }
         dur="$(wav_seconds "$raw")"
@@ -267,46 +342,78 @@ while :; do
     # raw file is gone and no audio exists: move on to the next lesson.
     [[ -f "$raw" ]] || { [[ -n "$html_path" ]] && rm -f "$html_path"; continue; }
 
-    echo "Processing voice (CLEAN=$CLEAN)…"
-    dest="$AUDIO_DIR/${slug}.wav"
-    case "$CLEAN" in
-        full) "$HERE/audio-clean.sh" "$raw" "$dest" ;;
-        raw)  cp -f "$raw" "$dest" ;;
-        *)    "${FFMPEG[@]}" -hide_banner -loglevel error -y -i "$raw" \
-                  -af "$CLEAN_AF" -ar 48000 "$dest" ;;
-    esac
+    # This take is committed. Mark the slug done for THIS session right away so
+    # the picker never offers it again. The on-disk "recorded" marker (the wav
+    # in AUDIO_DIR) is now written by the BACKGROUND job, which may be queued
+    # behind an earlier render, so it won't exist yet when the loop asks for the
+    # next lesson. Without this line `py next` would re-hand-you the lesson you
+    # just recorded, and a second take would clobber the raw the background job
+    # is still reading. Harmless in --new mode (no picker consults SKIP_SLUGS).
+    SKIP_SLUGS="$SKIP_SLUGS $slug"
 
     # Title sidecar next to the eventual mp4; youtube_upload.py reads this and
     # posts under the real wiki title instead of a random one.
     printf '%s\n' "$title" > "$OUTPUT_DIR/${slug}.title.txt"
 
-    # Render in the background, serialized by a lock so recording several in a
-    # row doesn't spawn a pile of parallel ffmpeg renders.
-    #   trap '' INT HUP    a committed take must render even if you Ctrl-C the
+    # Everything from here (voice processing + render) happens in the
+    # background, serialized by a lock so recording several takes in a row
+    # never makes you wait on ffmpeg: you're back at the next prompt instantly,
+    # and queued jobs run one at a time behind the scenes.
+    #   trap '' INT HUP    a committed take must finish even if you Ctrl-C the
     #                      recorder or close the terminal (same process group).
     #   rm stale mp4       make_videos skips existing outputs, so a re-recorded
     #                      lesson must drop its old video to get a new render.
     #   VOICE_DENOISE=     skip make_videos' own denoise (voice already done).
     #   MUSIC_ROTATION     random start track; per-slug runs would otherwise
     #                      all open the video on the same song.
-    echo "Rendering video with images + navylily.tv watermark (in background)…"
+    dest="$AUDIO_DIR/${slug}.wav"
+    # `set -m` for the launch puts this job in its OWN process group so
+    # freeze_renders can SIGSTOP the whole tree with one signal while you record
+    # the next take. Monitor mode is turned back off immediately (the group is
+    # fixed at fork time); in a script it prints no job-control chatter.
+    set -m
     (
         trap '' INT HUP
+        # Yield to the live mic. This batch work (ffmpeg voice clean + a 60fps
+        # x264 render) would otherwise peg every core and starve the foreground
+        # capture, causing PulseAudio xruns — dropouts/clicks in the take you're
+        # recording RIGHT NOW. Drop this whole job (and the ffmpeg children it
+        # spawns, which inherit these) to the lowest CPU + idle disk priority so
+        # recording always wins the CPU. Unprivileged niceness only goes up, so
+        # these never need root; both are best-effort (|| true).
+        renice -n 19 -p "$BASHPID" >/dev/null 2>&1 || true
+        command -v ionice >/dev/null 2>&1 && ionice -c3 -p "$BASHPID" >/dev/null 2>&1 || true
         flock 9
-        rm -f "$OUTPUT_DIR/${slug}.mp4"
-        echo "=== $(date '+%F %T')  render $slug ===" >>"$RENDER_LOG"
-        if VOICE_DENOISE= MUSIC_ROTATION=$((RANDOM % 100)) \
-            "$HERE/make_videos.sh" "$slug" >>"$RENDER_LOG" 2>&1; then
+        echo "=== $(date '+%F %T')  process+render $slug ===" >>"$RENDER_LOG"
+        # One && chain, evaluated as an `if` condition so `set -e` can't abort
+        # the subshell mid-way and skip the notify: clean the voice, and only
+        # once that succeeds drop the old mp4 (so a failed re-record's audio
+        # never deletes a good video) and render. Any failure -> the else arm.
+        if {
+                case "$CLEAN" in
+                    full) "$HERE/audio-clean.sh" "$raw" "$dest" ;;
+                    raw)  cp -f "$raw" "$dest" ;;
+                    *)    "${FFMPEG[@]}" -hide_banner -loglevel error -y -i "$raw" \
+                              -af "$CLEAN_AF" -ar 48000 "$dest" ;;
+                esac
+           } >>"$RENDER_LOG" 2>&1 \
+           && rm -f "$OUTPUT_DIR/${slug}.mp4" \
+           && VOICE_DENOISE= MUSIC_ROTATION=$((RANDOM % 100)) \
+                  "$HERE/make_videos.sh" "$slug" >>"$RENDER_LOG" 2>&1
+        then
             echo "    OK $OUTPUT_DIR/${slug}.mp4" >>"$RENDER_LOG"
             notify "Navy Lily" "Rendered: $title"
         else
-            echo "    FAILED render for $slug (see above)" >>"$RENDER_LOG"
-            notify "Navy Lily" "RENDER FAILED: $title (see render.log)"
+            echo "    FAILED process/render for $slug (see above)" >>"$RENDER_LOG"
+            notify "Navy Lily" "PROCESS/RENDER FAILED: $title (see render.log)"
         fi
     ) 9>"$RENDER_LOCK" &
+    RENDER_PIDS+=("$!")   # its pgid == its pid; freeze_renders signals the group
+    set +m
 
-    echo "✓ '$title' saved. It will render, then auto-post PRIVATE (1/day),"
-    echo "   going public 7 days after upload. Render log: $RENDER_LOG"
+    (( FREE_MODE )) || DONE_THIS_SESSION=$(( DONE_THIS_SESSION + 1 ))
+    echo "✓ '$title' saved · rendering in background · auto-posts PRIVATE (1/day, public in 7d)"
+    progress_bar
     [[ -n "$html_path" ]] && rm -f "$html_path"
     echo
     if (( FREE_MODE )); then

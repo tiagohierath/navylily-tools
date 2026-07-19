@@ -64,10 +64,24 @@ export AUDIO_DIR OUTPUT_DIR   # lessons.py reads these
 
 mkdir -p "$AUDIO_DIR" "$OUTPUT_DIR" "$RAW_DIR"
 
-# Lessons skipped in THIS session (declined re-record). Without this the picker
-# would offer the same first-unrecorded lesson again immediately.
+# Lessons skipped in THIS session (declined re-record, or "skip this one" at the
+# record prompt). Without this the picker would offer the same lesson again.
 SKIP_SLUGS=""
 export SKIP_SLUGS
+
+# Persistent skip list: lessons you chose to skip for good (you won't record all
+# ~113). One slug per line. Loaded into SKIP_SLUGS every run, so those are never
+# offered again. SKIPPED_COUNT (skipped AND not yet recorded) shrinks the goal
+# the progress bar counts toward, so "all done" means "all the ones you wanted".
+SKIP_FILE="${SKIP_FILE:-$VIDEOS_DIR/skipped.txt}"
+SKIPPED_COUNT=0
+if [[ -f "$SKIP_FILE" ]]; then
+    while read -r _s; do
+        [[ -n "$_s" ]] || continue
+        SKIP_SLUGS="$SKIP_SLUGS $_s"
+        [[ -f "$OUTPUT_DIR/${_s}.mp4" || -f "$AUDIO_DIR/${_s}.wav" ]] || SKIPPED_COUNT=$(( SKIPPED_COUNT + 1 ))
+    done < "$SKIP_FILE"
+fi
 
 # --- ffmpeg: prefer the system one; fall back to nix (this box is ephemeral). -
 if command -v ffmpeg >/dev/null 2>&1; then
@@ -180,13 +194,19 @@ repeat() { local i out=""; for ((i=0; i<$2; i++)); do out+="$1"; done; printf '%
 
 progress_bar() {
     (( TOTAL_LESSONS > 0 )) || return 0
-    local done=$(( BASE_DONE + DONE_THIS_SESSION )) width=28
-    (( done > TOTAL_LESSONS )) && done=$TOTAL_LESSONS
-    local filled=$(( done * width / TOTAL_LESSONS ))
-    local pct=$(( done * 100 / TOTAL_LESSONS ))
-    printf '  Wiki  [%s%s]  %d/%d lessons  (%d%%)\n' \
+    # Count toward the GOAL = every lesson minus the ones you skipped for good,
+    # so 100% means "recorded all the ones you wanted", not all 113.
+    local goal=$(( TOTAL_LESSONS - SKIPPED_COUNT )) width=28
+    (( goal < 1 )) && goal=1
+    local done=$(( BASE_DONE + DONE_THIS_SESSION ))
+    (( done > goal )) && done=$goal
+    local filled=$(( done * width / goal ))
+    local pct=$(( done * 100 / goal ))
+    local extra=""
+    (( SKIPPED_COUNT > 0 )) && extra=" · ${SKIPPED_COUNT} skipped"
+    printf '  Wiki  [%s%s]  %d/%d lessons  (%d%%%s)\n' \
         "$(repeat '█' "$filled")" "$(repeat '░' $(( width - filled )))" \
-        "$done" "$TOTAL_LESSONS" "$pct"
+        "$done" "$goal" "$pct" "$extra"
 }
 
 # --- --list just prints the roster and exits. --------------------------------
@@ -248,8 +268,18 @@ while :; do
     else
         rc=$?
         if [[ $rc -eq 3 ]]; then
-            [[ -n "$SEARCH" ]] && echo "No lesson matches: $SEARCH" \
-                               || echo "Nothing left to pick (all recorded, or skipped this session)."
+            if [[ -n "$SEARCH" ]]; then
+                echo "No lesson matches: $SEARCH"
+            else
+                echo
+                progress_bar
+                if (( TOTAL_LESSONS > 0 && BASE_DONE + DONE_THIS_SESSION >= TOTAL_LESSONS - SKIPPED_COUNT )); then
+                    echo "🎉 All done! Recorded every lesson you wanted"
+                    (( SKIPPED_COUNT > 0 )) && echo "   (${SKIPPED_COUNT} skipped on purpose)."
+                else
+                    echo "Nothing left this session — the rest were skipped for now. Re-run to revisit."
+                fi
+            fi
             exit 0
         fi
         exit $rc
@@ -269,7 +299,22 @@ while :; do
     raw="$RAW_DIR/${slug}.raw.wav"
 
     while :; do
-        read -r -p "Press ENTER to start recording… " _ || exit 0
+        read -r -p "ENTER to record · 's' skip this lesson · 'q' quit… " _ans || exit 0
+        case "${_ans,,}" in
+            q|quit) echo "Done for now. 👋"; exit 0 ;;
+            s|skip)
+                # Skip for good: remember it so it's never offered again, and
+                # (in --new mode there's no slug/file, so guard on FREE_MODE).
+                if (( FREE_MODE )); then
+                    echo "  ↷ skipped."
+                else
+                    printf '%s\n' "$slug" >> "$SKIP_FILE"
+                    SKIP_SLUGS="$SKIP_SLUGS $slug"
+                    SKIPPED_COUNT=$(( SKIPPED_COUNT + 1 ))
+                    echo "  ↷ skipped '$title' — won't be offered again."
+                fi
+                break ;;   # no raw exists, so the guard below moves to the next
+        esac
         # Freeze any in-flight render so the capture has the whole CPU (no
         # xruns), and thaw it the moment recording stops — even if ffmpeg errors.
         freeze_renders

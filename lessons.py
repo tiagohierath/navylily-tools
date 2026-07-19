@@ -15,9 +15,10 @@ drift.
 Subcommands (paths come from env: WIKI_DIR, AUDIO_DIR, OUTPUT_DIR):
   next [search]   Pick a lesson and print a TAB-separated line:
                       slug <TAB> title <TAB> md_path <TAB> html_path
-                  With no search: the first not-yet-recorded lesson (wiki
-                  order), minus any slugs in $SKIP_SLUGS (space separated,
-                  the recorder's per-session skip list).
+                  With no search: a RANDOM not-yet-recorded lesson (so similar
+                  articles aren't narrated back to back), minus any slugs in
+                  $SKIP_SLUGS (space separated, the recorder's per-session skip
+                  list).
                   With a search: the first lesson whose title/slug/filename
                   matches, recorded or not (used to re-record one on purpose).
                   Exit code 3 (and no output) when there is nothing to pick.
@@ -26,6 +27,7 @@ Subcommands (paths come from env: WIKI_DIR, AUDIO_DIR, OUTPUT_DIR):
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import os
 import re
@@ -192,11 +194,16 @@ def pick_next(search: str | None) -> Lesson | None:
             if q in L.title.lower() or q in L.slug or q in L.md.stem.lower():
                 return L
         return None
+    # Un-recorded lessons, minus SKIP_SLUGS (the recorder's set of lessons
+    # already recorded / declined / permanently skipped this session).
     skip = set(os.environ.get("SKIP_SLUGS", "").split())
-    for L in lessons:
-        if not L.recorded and L.slug not in skip:
-            return L
-    return None
+    candidates = [L for L in lessons if not L.recorded and L.slug not in skip]
+    # Stable scramble: order by a hash of the slug, so it is ONE fixed random
+    # order you progress through (not re-rolled on every call). As lessons get
+    # recorded/skipped they drop out; the rest keep their scrambled positions,
+    # so you never narrate a run of near-identical articles back to back.
+    candidates.sort(key=lambda L: hashlib.md5(L.slug.encode()).hexdigest())
+    return candidates[0] if candidates else None
 
 
 def main(argv: list[str]) -> int:

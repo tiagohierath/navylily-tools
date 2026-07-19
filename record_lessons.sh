@@ -273,30 +273,35 @@ while :; do
         # Freeze any in-flight render so the capture has the whole CPU (no
         # xruns), and thaw it the moment recording stops — even if ffmpeg errors.
         freeze_renders
-        # Live elapsed timer (background) so you know when to stop: it flips to
-        # "past minimum" the moment the take clears MIN_MINUTES. ffmpeg runs
-        # SILENT (-nostats) in the foreground so it still reads 'q' from stdin to
-        # stop, and our timer is the only line moving on screen.
-        (
-            start=$SECONDS
-            while :; do
-                e=$(( SECONDS - start ))
-                if (( e >= MIN_SECONDS )); then
-                    printf '\r  ● REC  %s   ✓ past %smin — press q to stop      ' "$(fmt_mmss "$e")" "$MIN_MINUTES"
-                else
-                    printf '\r  ● REC  %s   need %smin, keep going…             ' "$(fmt_mmss "$e")" "$MIN_MINUTES"
-                fi
-                sleep 1
-            done
-        ) &
-        ticker=$!
-        # -c:a pcm_s16le so the wave module can read the header for the length
-        # check; -ac 1 mono voice; pulse default mic. 'q' on stdin stops cleanly.
-        "${FFMPEG[@]}" -hide_banner -loglevel error -nostats -f pulse -i "$MIC" \
-            -ac 1 -ar 48000 -c:a pcm_s16le -y "$raw" || true
-        kill "$ticker" 2>/dev/null || true
-        wait "$ticker" 2>/dev/null || true
+        # Record in the BACKGROUND with -nostdin so a stray or bumped key can
+        # NEVER stop the take. We own the keyboard here: the loop ticks a live
+        # elapsed timer, and stopping takes TWO deliberate actions — press ENTER,
+        # then confirm y/N — so nothing ends the recording by accident.
+        "${FFMPEG[@]}" -hide_banner -loglevel error -nostats -nostdin \
+            -f pulse -i "$MIC" -ac 1 -ar 48000 -c:a pcm_s16le -y "$raw" &
+        rec_pid=$!
+        start=$SECONDS
+        while kill -0 "$rec_pid" 2>/dev/null; do
+            e=$(( SECONDS - start ))
+            if (( e >= MIN_SECONDS )); then
+                printf '\r%-72s' "  ● REC  $(fmt_mmss "$e")   ✓ past ${MIN_MINUTES}min — press ENTER to stop"
+            else
+                printf '\r%-72s' "  ● REC  $(fmt_mmss "$e")   need ${MIN_MINUTES}min, keep going…"
+            fi
+            # read completes only on ENTER (a full line); a lone stray key won't
+            # trip it. On the ~1s timeout the loop just re-ticks the timer.
+            if read -r -t 1 -s _; then
+                printf '\n'
+                read -r -p "  Stop recording? [y/N] " a || a=""
+                [[ "$a" =~ ^[Yy] ]] && break
+                echo "  …still recording. (audio kept running the whole time)"
+            fi
+        done
         printf '\n'
+        # Graceful stop: SIGINT makes ffmpeg finalize the wav header cleanly
+        # (verified to yield a valid, readable file). No-op if it already exited.
+        kill -INT "$rec_pid" 2>/dev/null || true
+        wait "$rec_pid" 2>/dev/null || true
         thaw_renders
 
         [[ -f "$raw" ]] || { echo "No audio captured. Let's try again."; continue; }

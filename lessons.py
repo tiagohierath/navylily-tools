@@ -225,11 +225,18 @@ def main(argv: list[str]) -> int:
 
     if cmd == "list":
         lessons = all_lessons()
-        done = sum(1 for L in lessons if L.recorded)
+        skip = set(os.environ.get("SKIP_SLUGS", "").split())
+        rec = skipn = todo = 0
         for L in lessons:
-            mark = "x" if L.recorded else "_"
+            if L.recorded:
+                mark = "x"; rec += 1
+            elif L.slug in skip:
+                mark = "~"; skipn += 1
+            else:
+                mark = " "; todo += 1
             print(f"[{mark}]\t{L.slug}\t{L.title}")
-        print(f"\n{done}/{len(lessons)} recorded", file=sys.stderr)
+        print(f"\n{rec} recorded · {skipn} skipped · {todo} to record  "
+              f"(of {len(lessons)})   [x]=done [~]=skipped [ ]=todo", file=sys.stderr)
         return 0
 
     if cmd == "count":

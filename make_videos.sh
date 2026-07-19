@@ -9,13 +9,11 @@
 #
 # The audio gets a single denoise filter (afftdn) to knock down steady mic hiss /
 # white noise, and nothing else — no EQ, compression, or loudness normalization.
-# It's otherwise at its original level; optional background music (left untouched)
-# is mixed subtly underneath.
+# It's otherwise at its original level.
 #
 # Layout (created automatically if missing):
 #   videos/audio/    -> input audio files (wav, mp3, m4a, flac, ...)
 #   videos/images/   -> input images (jpg, jpeg, png)
-#   videos/music/    -> optional background music, cycled + mixed very subtly
 #   videos/output/   -> generated videos land here
 #   videos/fonts/    -> bundled EBGaramond.ttf (serif watermark font)
 #
@@ -60,7 +58,6 @@ AUDIO_DIR="$BASE_DIR/audio"
 IMAGES_DIR="$BASE_DIR/images"
 OUTPUT_DIR="$BASE_DIR/output"
 FONTS_DIR="$BASE_DIR/fonts"
-MUSIC_DIR="$BASE_DIR/music"   # background music bed; cycled across renders
 WORK_DIR="$(mktemp -d)"
 
 WIDTH=1440          # 4:3 at 1080p height (always 1080p, never 4k)
@@ -75,20 +72,6 @@ FAST_MIN_SECONDS=1
 FAST_MAX_SECONDS=3
 REST_MIN_SECONDS=10
 REST_MAX_SECONDS=20
-
-# Background music bed. Drop any number of tracks in videos/music/ and they're
-# cycled across renders: each video starts on the next track in the folder and
-# the rotation loops to fill the whole timeline, so a short loop never runs out
-# and consecutive videos don't all open on the same song. The bed is used at its
-# original level and then pulled WAY down by MUSIC_GAIN_DB so it sits *very*
-# subtly under the narration — felt more than heard. Empty/missing folder => no
-# music, audio path is unchanged.
-#   MUSIC_GAIN_DB: attenuation applied to the bed before it's mixed under the
-#   narration. -24 dB keeps it as barely-there ambience.
-#   Set MUSIC=0 to disable, or raise MUSIC_GAIN_DB toward 0 to bring it forward.
-MUSIC="${MUSIC:-1}"
-MUSIC_GAIN_DB="${MUSIC_GAIN_DB:--24}"  # duck the bed this far under the voice
-MUSIC_ROTATION="${MUSIC_ROTATION:-0}"   # track the NEXT video starts on (cycles; env overridable so single-video callers can still vary it)
 
 WATERMARK_TEXT="Aulas completas em navylily.tv"
 WATERMARK_SECONDS=30
@@ -195,7 +178,7 @@ ensure_outro || true
 # ---------------------------------------------------------------------------
 # Setup folders
 # ---------------------------------------------------------------------------
-mkdir -p "$AUDIO_DIR" "$IMAGES_DIR" "$OUTPUT_DIR" "$FONTS_DIR" "$MUSIC_DIR"
+mkdir -p "$AUDIO_DIR" "$IMAGES_DIR" "$OUTPUT_DIR" "$FONTS_DIR"
 
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
@@ -204,7 +187,6 @@ shopt -s nullglob nocaseglob
 
 audio_files=("$AUDIO_DIR"/*.wav "$AUDIO_DIR"/*.mp3 "$AUDIO_DIR"/*.m4a "$AUDIO_DIR"/*.flac "$AUDIO_DIR"/*.aac "$AUDIO_DIR"/*.ogg)
 image_files=("$IMAGES_DIR"/*.jpg "$IMAGES_DIR"/*.jpeg "$IMAGES_DIR"/*.png)
-music_files=("$MUSIC_DIR"/*.wav "$MUSIC_DIR"/*.mp3 "$MUSIC_DIR"/*.m4a "$MUSIC_DIR"/*.flac "$MUSIC_DIR"/*.aac "$MUSIC_DIR"/*.ogg)
 
 if [[ ${#audio_files[@]} -eq 0 ]]; then
     echo "No audio files found in $AUDIO_DIR. Drop some in and re-run." >&2
@@ -244,11 +226,6 @@ if [[ ${#image_files[@]} -eq 0 ]]; then
 fi
 
 echo "Found ${#audio_files[@]} audio file(s) and ${#image_files[@]} image(s)."
-if [[ "$MUSIC" == "1" && ${#music_files[@]} -gt 0 ]]; then
-    echo "Background music: ${#music_files[@]} track(s) cycled at ${MUSIC_GAIN_DB} dB (very subtle)."
-else
-    echo "Background music: none."
-fi
 echo "Watermark font: ${FONTFILE:-<none>}"
 
 # ---------------------------------------------------------------------------
@@ -362,43 +339,6 @@ prepare_audio() {
 }
 
 # ---------------------------------------------------------------------------
-# Background music bed. Cycles through videos/music/, starting on the track at
-# MUSIC_ROTATION (which advances by one per video) and looping the folder until
-# the bed is at least $needed seconds long, then trims to exactly that. The bed
-# is used at its original level — no normalization, no fades. The big
-# MUSIC_GAIN_DB attenuation happens later, in the mux, so the bed sits *very*
-# subtly under the narration. Writes a 48kHz stereo wav to $2 and returns
-# non-zero (no bed written) when there's no music.
-#
-# Args: <needed_seconds> <out.wav>
-# ---------------------------------------------------------------------------
-build_music_bed() {
-    local needed="$1" out="$2"
-    local n=${#music_files[@]}
-    (( n == 0 )) && return 1
-
-    # Cycle the folder (looping) until we've queued enough audio to cover the
-    # whole timeline. Starting offset rotates per video so consecutive renders
-    # don't all open on the same song.
-    local list="$out.concat.txt"; : > "$list"
-    local total=0 i=0
-    while (( $(awk -v t="$total" -v need="$needed" 'BEGIN{print (t < need)}') )); do
-        local idx=$(( (MUSIC_ROTATION + i) % n ))
-        local f="${music_files[$idx]}"
-        printf "file '%s'\n" "$f" >> "$list"
-        local d
-        d="$(get_audio_duration "$f")"
-        total="$(awk -v t="$total" -v d="$d" 'BEGIN{printf "%.4f", t+d}')"
-        i=$((i + 1))
-    done
-    # Next video starts on the next track in the folder.
-    MUSIC_ROTATION=$(( (MUSIC_ROTATION + 1) % n ))
-
-    ffmpeg -y -f concat -safe 0 -i "$list" \
-        -t "$needed" -ar 48000 -ac 2 -c:a pcm_s16le "$out" >/dev/null 2>&1
-}
-
-# ---------------------------------------------------------------------------
 # Main render loop
 # ---------------------------------------------------------------------------
 for audio in "${audio_files[@]}"; do
@@ -457,17 +397,6 @@ for audio in "${audio_files[@]}"; do
     audio_wav="$run_dir/audio.wav"
     prepare_audio "$audio" "$audio_wav"
 
-    # Optional very-subtle background music bed, cycled across renders and
-    # stretched (looped) to the full timeline length.
-    music_bed=""
-    if [[ "$MUSIC" == "1" ]]; then
-        bed="$run_dir/music_bed.wav"
-        echo "  building background music bed (${MUSIC_GAIN_DB} dB under voice)..."
-        if build_music_bed "$total_video" "$bed"; then
-            music_bed="$bed"
-        fi
-    fi
-
     # Mux: the clips are already final-quality H.264 with the watermark baked in,
     # so the VIDEO IS COPIED (never re-encoded) and only the audio is encoded.
     # Each frame is therefore encoded exactly once — the main speed win.
@@ -477,26 +406,12 @@ for audio in "${audio_files[@]}"; do
     # the speech) plays over silence instead of being cut by -shortest.
     echo "  muxing (video copied, audio encoded)..."
     tmp_out="$run_dir/final.mp4"
-    if [[ -n "$music_bed" ]]; then
-        # Mix the subtle music bed under the narration. apad keeps the voice
-        # spanning the full timeline; the music is attenuated by MUSIC_GAIN_DB
-        # and amix runs with normalize=0 so the voice stays at its full level
-        # (default amix would halve both). -t trims to the exact video length.
-        music_vol="$(awk -v g="$MUSIC_GAIN_DB" 'BEGIN{printf "%.6f", 10^(g/20)}')"
-        ffmpeg -y -f concat -safe 0 -i "$concat_list" -i "$audio_wav" -i "$music_bed" \
-            -filter_complex "[1:a]apad[v];[2:a]volume=${music_vol}[m];[v][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]" \
-            -map 0:v:0 -map "[a]" -t "$total_video" \
-            -c:v copy -c:a aac -b:a 320k \
-            -movflags +faststart \
-            "$tmp_out" >/dev/null 2>&1
-    else
-        ffmpeg -y -f concat -safe 0 -i "$concat_list" -i "$audio_wav" \
-            -map 0:v:0 -map 1:a:0 \
-            -af apad -t "$total_video" \
-            -c:v copy -c:a aac -b:a 320k \
-            -movflags +faststart \
-            "$tmp_out" >/dev/null 2>&1
-    fi
+    ffmpeg -y -f concat -safe 0 -i "$concat_list" -i "$audio_wav" \
+        -map 0:v:0 -map 1:a:0 \
+        -af apad -t "$total_video" \
+        -c:v copy -c:a aac -b:a 320k \
+        -movflags +faststart \
+        "$tmp_out" >/dev/null 2>&1
 
     # Publish in two steps: WORK_DIR usually lives on another filesystem
     # (/tmp), where a direct mv degrades to a non-atomic copy that the daily

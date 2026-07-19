@@ -189,6 +189,7 @@ thaw_renders() {
 TOTAL_LESSONS=0
 BASE_DONE=0
 DONE_THIS_SESSION=0
+SESSION_RECORDED=0   # takes committed this run (wiki + --new), for the summary
 
 repeat() { local i out=""; for ((i=0; i<$2; i++)); do out+="$1"; done; printf '%s' "$out"; }
 
@@ -209,9 +210,93 @@ progress_bar() {
         "$done" "$goal" "$pct" "$extra"
 }
 
+# --- Background voice-clean + render, serialized/niced/freezable. -------------
+# $1 slug  $2 title  $3 (optional) raw wav to voice-clean first. Omit $3 to just
+# re-render from an already-cleaned wav (the self-heal path). Launched in its own
+# process group (set -m) so freeze_renders can SIGSTOP the whole tree; niced so a
+# render never starves the live mic. One && chain under `if` so `set -e` can't
+# skip the notify, and the old mp4 is only removed AFTER the clean succeeds (a
+# failed re-record's audio never deletes a good video).
+launch_render() {
+    local slug="$1" title="$2" raw="${3:-}"
+    local dest="$AUDIO_DIR/${slug}.wav"
+    set -m
+    (
+        trap '' INT HUP
+        renice -n 19 -p "$BASHPID" >/dev/null 2>&1 || true
+        command -v ionice >/dev/null 2>&1 && ionice -c3 -p "$BASHPID" >/dev/null 2>&1 || true
+        flock 9
+        echo "=== $(date '+%F %T')  render $slug ===" >>"$RENDER_LOG"
+        clean_ok=1
+        if [[ -n "$raw" ]]; then
+            {
+                case "$CLEAN" in
+                    full) "$HERE/audio-clean.sh" "$raw" "$dest" ;;
+                    raw)  cp -f "$raw" "$dest" ;;
+                    *)    "${FFMPEG[@]}" -hide_banner -loglevel error -y -i "$raw" \
+                              -af "$CLEAN_AF" -ar 48000 "$dest" ;;
+                esac
+            } >>"$RENDER_LOG" 2>&1 || clean_ok=0
+        fi
+        if (( clean_ok )) \
+           && rm -f "$OUTPUT_DIR/${slug}.mp4" \
+           && VOICE_DENOISE= "$HERE/make_videos.sh" "$slug" >>"$RENDER_LOG" 2>&1; then
+            echo "    OK $OUTPUT_DIR/${slug}.mp4" >>"$RENDER_LOG"
+            notify "Navy Lily" "Rendered: $title"
+        else
+            echo "    FAILED render for $slug (see above)" >>"$RENDER_LOG"
+            notify "Navy Lily" "RENDER FAILED: $title (see render.log)"
+        fi
+    ) 9>"$RENDER_LOCK" &
+    RENDER_PIDS+=("$!")   # its pgid == its pid; freeze_renders signals the group
+    set +m
+}
+
+# Resolve MIC=default to the actual pulse source name, so the banner shows which
+# device you're really about to record 10 lessons on (e.g. the FIFINE, not the
+# laptop mic). Falls back to the raw value if pactl isn't around.
+resolved_mic() {
+    if [[ "$MIC" == "default" ]] && command -v pactl >/dev/null 2>&1; then
+        pactl get-default-source 2>/dev/null || echo default
+    else
+        echo "$MIC"
+    fi
+}
+
+# Session summary + clean exit. Surfaces renders still finishing so you know not
+# to be surprised they're using the CPU, and that they'll still post.
+goodbye() {
+    thaw_renders   # never leave a frozen render behind
+    echo
+    (( SESSION_RECORDED > 0 )) && echo "Recorded ${SESSION_RECORDED} this session."
+    local pending=${#RENDER_PIDS[@]}
+    if (( pending > 0 )); then
+        echo "⏳ ${pending} still rendering in the background — they keep going"
+        echo "   even if you close this, and auto-post PRIVATE. Log: $RENDER_LOG"
+    fi
+    echo "👋"
+    exit 0
+}
+
 # --- --list just prints the roster and exits. --------------------------------
 if [[ "${1:-}" == "--list" || "${1:-}" == "-l" ]]; then
     py list
+    exit 0
+fi
+
+# --- --unskip: manage the permanent skip list. -------------------------------
+#   --unskip           show what you've skipped for good
+#   --unskip <slug>    put a skipped lesson back in rotation
+if [[ "${1:-}" == "--unskip" ]]; then
+    if [[ -z "${2:-}" ]]; then
+        echo "Skipped for good:"
+        [[ -s "$SKIP_FILE" ]] && sed 's/^/  /' "$SKIP_FILE" || echo "  (none)"
+    elif [[ -f "$SKIP_FILE" ]] && grep -qxF "$2" "$SKIP_FILE"; then
+        grep -vxF "$2" "$SKIP_FILE" > "$SKIP_FILE.tmp" && mv "$SKIP_FILE.tmp" "$SKIP_FILE"
+        echo "Un-skipped '$2' — it'll be offered again."
+    else
+        echo "Not in the skip list: ${2:-}"
+    fi
     exit 0
 fi
 
@@ -234,13 +319,29 @@ fi
 
 echo "Navy Lily · lesson recorder"
 progress_bar
-echo "  mic $MIC · min ${MIN_MINUTES}m · clean $CLEAN"
+echo "  mic $(resolved_mic) · min ${MIN_MINUTES}m · clean $CLEAN"
 if systemctl --user is-active navylily-youtube.timer >/dev/null 2>&1; then
     echo "  posting  ✓ on — auto-posts PRIVATE, 1/day, public after 7 days"
 else
     echo "  posting  ✗ OFF — takes will render + queue but NOT post"
     echo "           arm once: ./youtube_upload.sh --authorize && ./install_timer.sh"
 fi
+
+# Self-heal: a cleaned wav with no finished mp4 is an interrupted/failed render
+# (crash, disk full, laptop slept mid-render). Re-queue those so a lesson that
+# counts as "recorded" never silently sits un-published. No raw arg => render
+# straight from the wav that already exists.
+_healed=0
+shopt -s nullglob
+for _wav in "$AUDIO_DIR"/*.wav; do
+    _s="$(basename "$_wav" .wav)"
+    [[ -f "$OUTPUT_DIR/${_s}.mp4" ]] && continue
+    _t="$_s"; [[ -f "$OUTPUT_DIR/${_s}.title.txt" ]] && _t="$(cat "$OUTPUT_DIR/${_s}.title.txt")"
+    launch_render "$_s" "$_t"
+    _healed=$(( _healed + 1 ))
+done
+shopt -u nullglob
+(( _healed > 0 )) && echo "  ↻ re-queued ${_healed} unfinished render(s) from before"
 echo
 
 while :; do
@@ -280,7 +381,7 @@ while :; do
                     echo "Nothing left this session — the rest were skipped for now. Re-run to revisit."
                 fi
             fi
-            exit 0
+            goodbye
         fi
         exit $rc
     fi
@@ -301,7 +402,7 @@ while :; do
     while :; do
         read -r -p "ENTER to record · 's' skip this lesson · 'q' quit… " _ans || exit 0
         case "${_ans,,}" in
-            q|quit) echo "Done for now. 👋"; exit 0 ;;
+            q|quit) goodbye ;;
             s|skip)
                 # Skip for good: remember it so it's never offered again, and
                 # (in --new mode there's no slug/file, so guard on FREE_MODE).
@@ -405,74 +506,24 @@ while :; do
     # posts under the real wiki title instead of a random one.
     printf '%s\n' "$title" > "$OUTPUT_DIR/${slug}.title.txt"
 
-    # Everything from here (voice processing + render) happens in the
-    # background, serialized by a lock so recording several takes in a row
-    # never makes you wait on ffmpeg: you're back at the next prompt instantly,
-    # and queued jobs run one at a time behind the scenes.
-    #   trap '' INT HUP    a committed take must finish even if you Ctrl-C the
-    #                      recorder or close the terminal (same process group).
-    #   rm stale mp4       make_videos skips existing outputs, so a re-recorded
-    #                      lesson must drop its old video to get a new render.
-    #   VOICE_DENOISE=     skip make_videos' own denoise (voice already done).
-    #   MUSIC_ROTATION     random start track; per-slug runs would otherwise
-    #                      all open the video on the same song.
-    dest="$AUDIO_DIR/${slug}.wav"
-    # `set -m` for the launch puts this job in its OWN process group so
-    # freeze_renders can SIGSTOP the whole tree with one signal while you record
-    # the next take. Monitor mode is turned back off immediately (the group is
-    # fixed at fork time); in a script it prints no job-control chatter.
-    set -m
-    (
-        trap '' INT HUP
-        # Yield to the live mic. This batch work (ffmpeg voice clean + a 60fps
-        # x264 render) would otherwise peg every core and starve the foreground
-        # capture, causing PulseAudio xruns — dropouts/clicks in the take you're
-        # recording RIGHT NOW. Drop this whole job (and the ffmpeg children it
-        # spawns, which inherit these) to the lowest CPU + idle disk priority so
-        # recording always wins the CPU. Unprivileged niceness only goes up, so
-        # these never need root; both are best-effort (|| true).
-        renice -n 19 -p "$BASHPID" >/dev/null 2>&1 || true
-        command -v ionice >/dev/null 2>&1 && ionice -c3 -p "$BASHPID" >/dev/null 2>&1 || true
-        flock 9
-        echo "=== $(date '+%F %T')  process+render $slug ===" >>"$RENDER_LOG"
-        # One && chain, evaluated as an `if` condition so `set -e` can't abort
-        # the subshell mid-way and skip the notify: clean the voice, and only
-        # once that succeeds drop the old mp4 (so a failed re-record's audio
-        # never deletes a good video) and render. Any failure -> the else arm.
-        if {
-                case "$CLEAN" in
-                    full) "$HERE/audio-clean.sh" "$raw" "$dest" ;;
-                    raw)  cp -f "$raw" "$dest" ;;
-                    *)    "${FFMPEG[@]}" -hide_banner -loglevel error -y -i "$raw" \
-                              -af "$CLEAN_AF" -ar 48000 "$dest" ;;
-                esac
-           } >>"$RENDER_LOG" 2>&1 \
-           && rm -f "$OUTPUT_DIR/${slug}.mp4" \
-           && VOICE_DENOISE= MUSIC_ROTATION=$((RANDOM % 100)) \
-                  "$HERE/make_videos.sh" "$slug" >>"$RENDER_LOG" 2>&1
-        then
-            echo "    OK $OUTPUT_DIR/${slug}.mp4" >>"$RENDER_LOG"
-            notify "Navy Lily" "Rendered: $title"
-        else
-            echo "    FAILED process/render for $slug (see above)" >>"$RENDER_LOG"
-            notify "Navy Lily" "PROCESS/RENDER FAILED: $title (see render.log)"
-        fi
-    ) 9>"$RENDER_LOCK" &
-    RENDER_PIDS+=("$!")   # its pgid == its pid; freeze_renders signals the group
-    set +m
+    # Hand off to the background: voice-clean this raw take, then render. You're
+    # back at the next prompt instantly; the job runs niced and freezes while you
+    # record the next take. Passing "$raw" means "clean it first".
+    launch_render "$slug" "$title" "$raw"
 
+    SESSION_RECORDED=$(( SESSION_RECORDED + 1 ))
     (( FREE_MODE )) || DONE_THIS_SESSION=$(( DONE_THIS_SESSION + 1 ))
     echo "✓ '$title' saved · rendering in background · auto-posts PRIVATE (1/day, public in 7d)"
-    progress_bar
+    (( FREE_MODE )) || progress_bar
     [[ -n "$html_path" ]] && rm -f "$html_path"
     echo
     if (( FREE_MODE )); then
         read -r -p "Record another video? [Y/n] " a || exit 0
-        [[ "$a" =~ ^[Nn] ]] && { echo "Done for now. 👋"; exit 0; }
+        [[ "$a" =~ ^[Nn] ]] && goodbye
         echo
         continue
     fi
     read -r -p "Record the next lesson? [Y/n] " a || exit 0
-    [[ "$a" =~ ^[Nn] ]] && { echo "Done for now. 👋"; exit 0; }
+    [[ "$a" =~ ^[Nn] ]] && goodbye
     echo
 done

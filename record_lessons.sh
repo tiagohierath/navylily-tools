@@ -24,6 +24,10 @@
 #   ./record_lessons.sh                # work through un-recorded lessons
 #   ./record_lessons.sh "maos"         # jump to / re-record a specific article
 #   ./record_lessons.sh --list         # show every lesson and its recorded mark
+#   ./record_lessons.sh --new "Title"  # record a free video (any topic, not a
+#                                      # wiki article); title given here or asked
+#                                      # interactively. Same pipeline after that:
+#                                      # clean -> render -> auto-post PRIVATE.
 #
 # Env overrides:
 #   MIC=default          pulse source (default = system default mic, the FIFINE)
@@ -144,6 +148,16 @@ if [[ "${1:-}" == "--list" || "${1:-}" == "-l" ]]; then
     exit 0
 fi
 
+# --new: free-form mode. Not a wiki article: you name the video, everything
+# after the title (record, guard, clean, render, auto-post) is identical.
+FREE_MODE=0
+FREE_TITLE=""
+if [[ "${1:-}" == "--new" || "${1:-}" == "-n" ]]; then
+    FREE_MODE=1
+    shift || true
+    FREE_TITLE="${*:-}"
+fi
+
 SEARCH="${1:-}"
 
 echo "Navy Lily lesson recorder"
@@ -157,6 +171,24 @@ systemctl --user is-active navylily-youtube.timer >/dev/null 2>&1 \
 echo
 
 while :; do
+    if (( FREE_MODE )); then
+        # Free-form: title comes from you, not the wiki.
+        while [[ -z "$FREE_TITLE" ]]; do
+            read -r -p "Video title: " FREE_TITLE || exit 0
+        done
+        title="$FREE_TITLE"
+        slug="$(py slug "$title")"
+        html_path=""
+        FREE_TITLE=""   # next round asks again
+        if [[ -f "$OUTPUT_DIR/${slug}.mp4" || -f "$AUDIO_DIR/${slug}.wav" ]]; then
+            read -r -p "'$slug' already exists. Overwrite it? [y/N] " a || exit 0
+            [[ "$a" =~ ^[Yy] ]] || continue
+        fi
+        echo "────────────────────────────────────────────────────────"
+        echo "Video:  $title"
+        echo "Slug:   $slug"
+        echo
+    else
     # Pick the lesson: the search term (if any) on the first pass, then always
     # the next un-recorded, minus the ones skipped this session.
     if line="$(py next ${SEARCH:+"$SEARCH"})"; then
@@ -180,6 +212,7 @@ while :; do
     echo "Article: opening in your browser to read while you speak…"
     open_in_browser "file://$html_path"
     echo
+    fi
 
     raw="$RAW_DIR/${slug}.raw.wav"
 
@@ -232,7 +265,7 @@ while :; do
     done
     # If we broke out because the user declined to re-record a bad take, the
     # raw file is gone and no audio exists: move on to the next lesson.
-    [[ -f "$raw" ]] || { rm -f "$html_path"; continue; }
+    [[ -f "$raw" ]] || { [[ -n "$html_path" ]] && rm -f "$html_path"; continue; }
 
     echo "Processing voice (CLEAN=$CLEAN)…"
     dest="$AUDIO_DIR/${slug}.wav"
@@ -274,8 +307,14 @@ while :; do
 
     echo "✓ '$title' saved. It will render, then auto-post PRIVATE (1/day),"
     echo "   going public 7 days after upload. Render log: $RENDER_LOG"
-    rm -f "$html_path"
+    [[ -n "$html_path" ]] && rm -f "$html_path"
     echo
+    if (( FREE_MODE )); then
+        read -r -p "Record another video? [Y/n] " a || exit 0
+        [[ "$a" =~ ^[Nn] ]] && { echo "Done for now. 👋"; exit 0; }
+        echo
+        continue
+    fi
     read -r -p "Record the next lesson? [Y/n] " a || exit 0
     [[ "$a" =~ ^[Nn] ]] && { echo "Done for now. 👋"; exit 0; }
     echo

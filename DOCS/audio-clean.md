@@ -1,115 +1,35 @@
 # audio-clean.sh
 
-Deterministic "broadcast-ish" voice cleanup for the FIFINE USB mic (or any mic).
-Record raw, run this, and you always get the same consistent, platform-ready
-voice file. Pushes a budget USB mic from "room with furniture" into
-"surprisingly competent narrator" territory.
-
-## The chain (what each stage does)
-
-| Stage | Filter | Why |
-|-------|--------|-----|
-| Low-cut | `highpass=f=80` | kills rumble, desk thumps, AC hum |
-| High-cut | `lowpass=f=16000` | shaves the harsh hiss ceiling |
-| Denoise | `arnndn=m=sh.rnnn` | RNNoise neural noise suppression (natural, not "underwater") |
-| De-box | `equalizer=f=250:g=-2` | tames small-room "boxy" mids |
-| Presence | `equalizer=f=3500:g=+2` | lifts speech clarity / intelligibility |
-| Compress | `acompressor=threshold=-18dB:ratio=3` | evens out loud/quiet words |
-| Loudness | `loudnorm=I=-16:TP=-1.5:LRA=11` | normalizes to podcast/YouTube loudness |
-| Output | `-ar 48000` | pin sample rate (see note below) |
-
-## Commands
+Cleans a raw mic recording into a consistent, podcast-ready voice file. It removes rumble and hiss (RNNoise), fixes the boxy room sound, lifts speech clarity, evens out the volume, and normalizes loudness.
 
 ```bash
 ./audio-clean.sh raw.wav final.wav
-RNNOISE_MODEL=/path/to/other.rnnn ./audio-clean.sh raw.wav final.wav   # different model
 ```
 
-### Recording raw from the FIFINE (no arecord on this box — use PipeWire)
+## When to use it
+
+Usually you don't. `make_videos.sh` runs the same cleanup itself, so for videos just drop the raw recording in `videos/audio/` and render. Use this script only when you want a cleaned audio file on its own (a podcast cut, or to listen and tune the sound before rendering). Never run both on the same file, that would compress twice.
+
+## Recording raw audio on this box
+
+No `arecord` here, use PipeWire:
 
 ```bash
-wpctl status                                   # find the fifine source id (e.g. 73)
-wpctl set-default 73                            # make the FIFINE the default mic
-pw-record raw.wav                               # Ctrl-C to stop
-# ...or target it explicitly without changing the default:
-pw-record --target alsa_input.usb-MV-SILICON_fifine_Microphone_20190808-00.mono-fallback raw.wav
+wpctl status          # find the FIFINE source id
+wpctl set-default 73  # make it the default mic
+pw-record raw.wav     # Ctrl-C to stop
 ```
 
-Then: `./audio-clean.sh raw.wav final.wav`.
+## Tuning
 
-## Two bugs fixed vs. the original recipe
+The filter chain lives in `lib/voice-chain.sh` and is shared with `make_videos.sh`, so editing it changes both. The useful knobs:
 
-1. **`arnndn` needs a model.** `arnndn` with no `m=` errors out immediately.
-   We bundle `models/sh.rnnn` and pass `arnndn=m='…/models/sh.rnnn'`.
-2. **`loudnorm` outputs 192 kHz.** It upsamples internally for its true-peak
-   limiter and never comes back down. Without `-ar` every file lands at a bloated
-   192 kHz. We pin `-ar 48000`.
+- Less/more denoise: swap the RNNoise model with `RNNOISE_MODEL=/path/to/model.rnnn`. The bundled `models/sh.rnnn` is trained for speech and is right for narration.
+- Darker/brighter: the `lowpass=f=16000` value (lower = darker, less hiss).
+- Room sound and clarity: the two `equalizer=` lines (cut at 250 Hz, lift at 3500 Hz), adjust `g=` in dB.
+- Dynamics: the `acompressor` ratio (lower = more natural).
+- Loudness target: `loudnorm=I=-16` (podcast level; YouTube uses -14).
 
-## NixOS / ffmpeg
+## NixOS note
 
-The stock system `ffmpeg` on this machine is built **without** the `arnndn`
-filter. `audio-clean.sh` detects that and re-execs itself inside
-`nix shell nixpkgs#ffmpeg` (which has it). Nothing is installed system-wide.
-First run pays a few seconds of nix eval; after that it's cached.
-
-There is **no** `rnnoise-models` package in nixpkgs (the original flake snippet
-referenced one that doesn't exist), so the model is vendored in `models/`. The
-files are public domain per the upstream README ("none of this work is creative
-and thus none of it is subject to copyright").
-
-## Knobs you can edit (in `audio-clean.sh`)
-
-- **Less/more denoise** — swap the model via `RNNOISE_MODEL=`. Options (from
-  `GregorR/rnnoise-models`, by signal×noise):
-
-  | File | Trained for |
-  |------|-------------|
-  | `sh.rnnn` *(bundled)* | recorded **speech** — the default for narration |
-  | `bd.rnnn` (beguiling-drafter) | recorded **voice** (incl. laughter etc.) |
-  | `cb.rnnn` (conjoined-burgers) | recorded **general** audio |
-  | `mp.rnnn` (marathon-prescription) | general signal, general noise |
-
-  Get another: `curl -fsSL -o models/bd.rnnn https://raw.githubusercontent.com/GregorR/rnnoise-models/master/beguiling-drafter-2018-08-30/bd.rnnn`
-- **Brightness** — `lowpass=f=16000` (lower = darker/less hiss).
-- **EQ** — the two `equalizer=` lines (boxy-mid cut at 250 Hz, presence lift at
-  3500 Hz). Adjust `g=` in dB.
-- **Compression** — `acompressor=threshold=-18dB:ratio=3:...`. Softer ratio =
-  more natural dynamics.
-- **Target loudness** — `loudnorm=I=-16`. `-16` is podcast-ish; YouTube refs
-  `-14`.
-
-> The cleanup stages (everything before loudnorm) live in
-> [`lib/voice-chain.sh`](../lib/voice-chain.sh) and are **shared** with
-> `make_videos.sh`, so editing the EQ/denoise/compression there changes both.
-> This script just appends a single-pass `loudnorm=-16`.
-
-## Using it with `make_videos.sh` (one system)
-
-You do **not** need to run this before making a video. `make_videos.sh` now runs
-the **same** cleanup itself (`AUDIO_CLEAN=1`, on by default) and then its own
-two-pass `loudnorm` to `-14` for YouTube — one compression, one loudnorm, no
-double processing. So the video path is just:
-
-```
-record raw → drop in videos/audio/ → make_videos.sh → upload
-```
-
-Use **`audio-clean.sh` standalone** when you want a cleaned **audio file** on its
-own (a podcast cut, or to pre-listen and tune the EQ/denoise before rendering).
-Don't clean here *and* re-feed it through `make_videos.sh` — that would compress
-twice; let one of them do it.
-
-## Reality check (measured on this machine)
-
-- **No echo-cancel / auto-gain modules are loaded** — PipeWire is already *not*
-  "helping," so the spec's "disable AGC/echo-cancel" steps are a no-op here.
-- **PipeWire + pulse + alsa are already enabled** (it's running), so the
-  `services.pipewire` block is effectively already in place. No `/etc/nixos`
-  edit was made.
-- The optional WirePlumber drop-in lives at
-  [`wireplumber/51-mic-clean.conf`](../wireplumber/51-mic-clean.conf) — see its
-  header to install. It's only worth it if you hit idle-suspend start-clipping;
-  it is **not** installed by default (a malformed user WP config can break login
-  audio, and there's nothing here it needs to fix).
-- Biggest real-world gain is still **room noise** — RNNoise + the mic can't beat
-  treating the space.
+The system ffmpeg lacks the RNNoise filter, so the script re-runs itself inside `nix shell nixpkgs#ffmpeg` automatically. Nothing gets installed. The first run takes a few extra seconds, then it's cached.

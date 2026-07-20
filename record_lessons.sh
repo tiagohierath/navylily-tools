@@ -16,7 +16,7 @@
 #      renders the video in the background, serialized by a lock.
 #   6. Writes the article title next to the mp4; youtube_upload.py posts it
 #      under that exact wiki title, PRIVATE, one per day, and YouTube flips it
-#      public automatically after YT_PUBLISH_AFTER_DAYS days (default 7).
+#      public automatically after YT_PUBLISH_AFTER_DAYS days (default 1).
 #
 # This script never uploads anything itself; the daily timer does the posting.
 #
@@ -321,7 +321,7 @@ echo "Navy Lily · lesson recorder"
 progress_bar
 echo "  mic $(resolved_mic) · min ${MIN_MINUTES}m · clean $CLEAN"
 if systemctl --user is-active navylily-youtube.timer >/dev/null 2>&1; then
-    echo "  posting  ✓ on — auto-posts PRIVATE, 1/day, public after 7 days"
+    echo "  posting  ✓ on — auto-posts PRIVATE, 1/day, public after 24h"
 else
     echo "  posting  ✗ OFF — takes will render + queue but NOT post"
     echo "           arm once: ./youtube_upload.sh --authorize && ./install_timer.sh"
@@ -513,7 +513,7 @@ while :; do
 
     SESSION_RECORDED=$(( SESSION_RECORDED + 1 ))
     (( FREE_MODE )) || DONE_THIS_SESSION=$(( DONE_THIS_SESSION + 1 ))
-    echo "✓ '$title' saved · rendering in background · auto-posts PRIVATE (1/day, public in 7d)"
+    echo "✓ '$title' saved · rendering in background · auto-posts PRIVATE (1/day, public in 24h)"
     (( FREE_MODE )) || progress_bar
     [[ -n "$html_path" ]] && rm -f "$html_path"
     echo

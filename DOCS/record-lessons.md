@@ -1,6 +1,6 @@
 # record_lessons.sh
 
-Record narration videos entirely from the terminal. It records your mic, cleans the voice, renders the video (images + navylily.tv watermark) in the background, and leaves it for the daily timer to post on YouTube (private, public after 7 days). You never touch a DAW or an editor.
+Record narration videos entirely from the terminal. It records your mic, cleans the voice, renders the video (images + navylily.tv watermark) in the background, and leaves it for the daily timer to post on YouTube (private, public after 24h). You never touch a DAW or an editor.
 
 Two ways to use it:
 

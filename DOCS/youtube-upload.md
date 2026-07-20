@@ -2,7 +2,7 @@
 
 Uploads exactly one video per run from `videos/output/` to YouTube, always private. Built so it can never over-post: run it as often as you want, it still posts at most one video per day.
 
-Every upload is scheduled to go public automatically 7 days later (`YT_PUBLISH_AFTER_DAYS`, `0` disables). That window is your time to set the thumbnail in YouTube Studio.
+Every upload is scheduled to go public automatically 1 day later (`YT_PUBLISH_AFTER_DAYS`, `0` disables). That window is your time to set the thumbnail in YouTube Studio.
 
 Titles: if `record_lessons.sh` left a `<video>.title.txt` next to the mp4, that exact title is used. Otherwise it gets a random working title you rename later.
 
@@ -37,10 +37,16 @@ Secrets and state live in `~/.local/state/navylily-youtube/`, never in the repo.
 ## Useful settings (env vars)
 
 ```bash
-YT_PUBLISH_AFTER_DAYS=7    # days until a video goes public (0 = stays private)
-YT_MIN_HOURS_BETWEEN=24    # 168 = once a week
+YT_PUBLISH_AFTER_DAYS=1    # days until a video goes public (0 = stays private)
+YT_MIN_HOURS_BETWEEN=156   # override the min gap; 156 = weekly, 12 = daily
 YT_OUTPUT_DIR=...          # look for videos somewhere else
 ```
+
+Cadence switches on its own: daily through 2026-12-31, then weekly from
+2027-01-01 (and every year after). Weekly is guaranteed by two independent
+caps, a 156h (6.5 day) cooldown that anchors a steady same-weekday post, and a
+hard "one upload per calendar week" guard that no timer or reboot timing can
+defeat. Set `YT_MIN_HOURS_BETWEEN` only to override that automatic schedule.
 
 ## State and resets
 

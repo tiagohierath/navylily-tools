@@ -74,13 +74,30 @@ TOKEN_FILE = Path(os.environ.get("YT_TOKEN", str(STATE_DIR / "token.json")))
 # Timezone for "one upload per calendar day".
 UPLOAD_TZ = os.environ.get("YT_TZ", "America/Sao_Paulo")
 
-# Minimum hours between two uploads. This is only a floor to stop an accidental
-# double-post (e.g. a manual run plus the timer on the same evening); the real
-# "one per calendar day" cap is uploaded_today(). It MUST stay well under 24, or
-# a fixed-time daily timer skips every other day: the timestamp is recorded when
-# the upload *finishes* (a few minutes past 18:00), so next day's 18:00 fire is
-# <24h later and a 24h floor would block it. 12h can never block the next day.
-MIN_HOURS_BETWEEN = float(os.environ.get("YT_MIN_HOURS_BETWEEN", "12"))
+# Minimum hours between two uploads. This is the ONLY thing that enforces
+# posting cadence: it works regardless of how often the timer fires (daily,
+# hourly retries, manual runs) by blocking any upload until enough time has
+# passed since the last one. The value must sit *below* the target interval,
+# never exactly on it, because the daily 18:00 timer fires a few minutes
+# BEFORE the previous run's finish-timestamp + interval, so an exact floor
+# fails the fence-post and slips a day:
+#   * DAILY  (pre-2027): 12h, not 24h. A 24h floor would make an 18:00 fire
+#     land <24h after yesterday's 18:0x finish and skip to the next day
+#     (posting every other day). 12h can never block the next day's fire.
+#   * WEEKLY (2027-01-01 on): 156h (6.5 days), not 168h. Exactly 168h makes
+#     each weekly fire land ~167.9h after the last finish, just under the
+#     floor, so it slips to the next day and drifts (posts every 8 days on a
+#     walking weekday). 156h blocks the 6 intervening daily fires but clears
+#     comfortably before the 7th, giving a steady same-weekday post with no
+#     separate weekly timer to maintain.
+WEEKLY_FROM_DATE = dt.date(2027, 1, 1)
+
+
+def min_hours_between() -> float:
+    override = os.environ.get("YT_MIN_HOURS_BETWEEN")
+    if override is not None:
+        return float(override)
+    return 156.0 if now_local().date() >= WEEKLY_FROM_DATE else 12.0
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 
@@ -89,7 +106,7 @@ VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 # gives a fixed window to set the real title + thumbnail in YouTube Studio while
 # it's still private, with no separate timer to run. Set to 0 to upload plain
 # private (no schedule) and publish by hand.
-PUBLISH_AFTER_DAYS = float(os.environ.get("YT_PUBLISH_AFTER_DAYS", "7"))
+PUBLISH_AFTER_DAYS = float(os.environ.get("YT_PUBLISH_AFTER_DAYS", "1"))
 
 # Pool of neutral, random working titles. The real title is set manually later.
 TITLE_WORDS_A = [
@@ -189,7 +206,7 @@ def cooldown_remaining(state: dict) -> float:
     if last_dt.tzinfo is None:
         last_dt = last_dt.astimezone()
     elapsed_h = (now_local() - last_dt).total_seconds() / 3600.0
-    return max(0.0, MIN_HOURS_BETWEEN - elapsed_h)
+    return max(0.0, min_hours_between() - elapsed_h)
 
 
 def uploaded_today(state: dict) -> bool:
@@ -203,6 +220,28 @@ def uploaded_today(state: dict) -> bool:
     if last_dt.tzinfo is None:
         last_dt = last_dt.astimezone()
     return last_dt.date() == now_local().date()
+
+
+def uploaded_this_week(state: dict) -> bool:
+    """True if an upload already happened in the current ISO week (Mon-Sun).
+
+    This is the hard, timer-independent weekly cap: unlike the 156h cooldown it
+    cannot be squeezed under a week by an odd-hour boot/catch-up fire, because
+    it keys on the calendar week itself, not elapsed hours. Only consulted once
+    weekly cadence is in effect (see WEEKLY_FROM_DATE); before then the daily
+    cap governs and this must never run, or it would block daily posting."""
+    last = state.get("last_upload_iso")
+    if not last:
+        return False
+    try:
+        last_dt = dt.datetime.fromisoformat(last)
+    except ValueError:
+        return False
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.astimezone()
+    last_y, last_w, _ = last_dt.isocalendar()
+    now_y, now_w, _ = now_local().isocalendar()
+    return (last_y, last_w) == (now_y, now_w)
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +426,9 @@ def main() -> int:
             "now_local": now_local().isoformat(),
             "last_upload_iso": state.get("last_upload_iso"),
             "uploaded_today": uploaded_today(state),
+            "uploaded_this_week": uploaded_this_week(state),
+            "weekly_cap_active": now_local().date() >= WEEKLY_FROM_DATE,
+            "min_hours_between": min_hours_between(),
             "cooldown_remaining_h": round(cooldown_remaining(state), 2),
             "uploaded_count": len(state.get("uploaded", [])),
             "publish_after_days": PUBLISH_AFTER_DAYS,
@@ -399,9 +441,12 @@ def main() -> int:
         print(f"Token stored at {TOKEN_FILE}")
         return 0
 
-    # ---- Safety #1: persistent daily / cooldown state. --------------------
+    # ---- Safety #1: persistent daily / weekly / cooldown state. -----------
     if uploaded_today(state):
         print("Already uploaded today, exiting (hard daily cap).")
+        return 0
+    if now_local().date() >= WEEKLY_FROM_DATE and uploaded_this_week(state):
+        print("Already uploaded this week, exiting (hard weekly cap).")
         return 0
     remaining = cooldown_remaining(state)
     if remaining > 0:

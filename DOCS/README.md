@@ -1,16 +1,19 @@
 # navylily-tools docs
 
-Simple guides for each script in this repo.
+Simple guides for each script in this repo. These tools sit beside Bildkasten
+and movielily in the short-film workflow: Bildkasten helps gather/redraw
+images, movielily owns the text EDL and render, and navylily-tools handles
+recording/upload support.
 
 - [record-lessons.md](record-lessons.md): record narration videos from the terminal (wiki articles or any topic)
 - [make-videos.md](make-videos.md): turn audio + images into YouTube-ready videos
 - [audio-clean.md](audio-clean.md): clean raw mic audio by itself
-- [youtube-upload.md](youtube-upload.md): upload one video per day to YouTube, private
-- [scheduling.md](scheduling.md): the daily 18:00 timer that runs the uploader
+- [youtube-upload.md](youtube-upload.md): upload one video per week to YouTube, private
+- [scheduling.md](scheduling.md): the weekly Sunday 13:00 timer that runs the uploader
 
 ## The whole pipeline in one line
 
-Record with `record_lessons.sh`, it cleans the voice and renders the video by itself, and the daily timer posts it private on YouTube. Seven days later YouTube makes it public. You only talk.
+Record with `record_lessons.sh`, it cleans the voice and renders the video by itself, and the weekly timer posts one private on YouTube every Sunday. A few days later YouTube makes it public. You only talk.
 
 ## Quick start
 
@@ -37,6 +40,21 @@ videos/music/    background music, optional
 videos/output/   finished .mp4 files
 DOCS/            this folder
 ~/.local/state/navylily-youtube/   YouTube secrets + upload state (never in the repo)
+```
+
+For a movielily film project, use its clearer project folders instead:
+
+```
+scripts/                  writing and shot notes
+storyboards/              rough boards
+images/                   stills and visual assets
+refs/                     references
+audio/dialogue/           narration and dialogue
+audio/music/              music beds
+fxs/                      overlays and texture plates
+sequences/                plain-text cuts
+exports/video/            rendered movies
+exports/storyboard-books/ printable storyboard PDFs
 ```
 
 ## NixOS note

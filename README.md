@@ -1,8 +1,23 @@
 # navylily-tools
 
-Just stuff, disposable uhh scripts i use for my youtube channel, to record, edit, post videos, etc, mostly bash scripts or python
+Small command-line tools for the [navylily.tv](https://navylily.tv) short-film
+and video workflow: record narration, render simple image videos, and upload
+finished work to YouTube.
 
-Small tools for the [navylily.tv](https://navylily.tv) workflow:
+This repo is part of a small film-making toolchain:
+
+- **Bildkasten** finds visual references and makes rough storyboard drawings.
+- **movielily** turns storyboards, images, audio, notes and text EDLs into a
+  timed animatic or finished render.
+- **navylily-tools** handles recording, batch video generation and YouTube
+  upload chores.
+
+The scripts here are deliberately boring: mostly Bash or Python, easy to open
+in a file manager, easy to run directly, and friendly to the organized project
+folders created by movielily (`audio/`, `images/`, `refs/`, `storyboards/`,
+`exports/`, etc.).
+
+Main tools:
 
 1. **`audio-clean.sh`**, clean a raw mic recording (RNNoise denoise + EQ +
    compression + loudness) into a consistent, broadcast-ish voice file. Tuned
@@ -35,6 +50,16 @@ videos/
   music/    optional background music, cycled + mixed very subtly (optional)
   output/   generated .mp4 land here
   fonts/    Cormorant.ttf (condensed serif watermark)
+```
+
+For movielily projects, prefer that project's own folders instead:
+
+```text
+audio/dialogue/     narration takes
+audio/music/        music beds
+images/             stills and boards used in the cut
+storyboards/        rough boards
+exports/video/      final renders
 ```
 
 Run:
@@ -89,7 +114,7 @@ Per lesson it opens the article in your browser to read aloud, records your mic
 
 The daily `youtube_upload.py` timer then posts one/day **private**, titled with
 the real article title, scheduled to go **public** after `YT_PUBLISH_AFTER_DAYS`
-(default 7), a window to set the title + thumbnail. Recorded state is detected
+(default 1), a window to set the title + thumbnail. Recorded state is detected
 from disk (a `videos/audio/*.wav` or `videos/output/*.mp4`), so there's nothing
 to track by hand.
 

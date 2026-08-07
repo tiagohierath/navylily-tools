@@ -25,3 +25,19 @@ videos/render.log
 # Python
 __pycache__/
 *.pyc
+
+# Bildkasten local state and image library
+bildkasten/.venv/
+bildkasten/venv/
+bildkasten/data/
+bildkasten/images/
+bildkasten/library/
+bildkasten/models/
+bildkasten/test.py
+bildkasten/*.jpg
+bildkasten/*.jpeg
+bildkasten/*.png
+bildkasten/*.webp
+bildkasten/*.gif
+bildkasten/*.heic
+!bildkasten/flake.lock

@@ -89,7 +89,8 @@ def main() -> int:
         print(f"  last upload: {last.astimezone(TZ):%a %d %b %H:%M}")
     print()
     if not pending:
-        print("  Queue empty — record more to keep the streak going.\n")
+        print("  Queue empty — render a Movielily video, then run:")
+        print("  movielily youtube --title \"Your video title\"\n")
         return 0
 
     # Project the same selected cadence as youtube_upload.py.
@@ -132,6 +133,8 @@ def main() -> int:
     print()
     print(f"  Covered through {last_public:%a %d %b} "
           f"(~{days} days). Record more before then.\n")
+    print("  The uploader will post the next item automatically. Use YouTube Studio")
+    print("  after upload to set its thumbnail.\n")
     return 0
 
 

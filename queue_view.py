@@ -82,6 +82,7 @@ def main() -> int:
 
     print()
     print(f"  YouTube queue — {len(done)} posted, {len(pending)} waiting")
+    print(f"  current cadence: {posting_cadence}")
     print(f"  schedule: {posting_cadence} at 18:00 (SP), "
           f"auto-public +{pub_days:g}d")
     if last:

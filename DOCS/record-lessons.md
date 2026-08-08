@@ -1,6 +1,6 @@
 # record_lessons.sh
 
-Record narration videos entirely from the terminal. It records your mic, cleans the voice, renders the video (images + navylily.tv watermark) in the background, and leaves it for the daily timer to post on YouTube (private, public after 24h). You never touch a DAW or an editor.
+Record narration videos entirely from the terminal. It records your mic, cleans the voice, renders the video (images + navylily.tv watermark) in the background, and leaves it for the scheduled timer to post on YouTube (private, public after 24h). You never touch a DAW or an editor.
 
 Two ways to use it:
 
@@ -23,7 +23,7 @@ Two ways to use it:
 2. Bad takes are caught automatically: shorter than 6 minutes, or near-silent (muted mic), and it offers a re-record.
 3. Then you choose: Keep (just press ENTER), Listen to it first, or Re-record.
 4. The voice gets a light cleanup and the video renders in the background (log: `videos/render.log`). You can already record the next one.
-5. The daily timer posts one video per day, private, under your exact title. YouTube flips it public 7 days after upload.
+5. The timer posts private videos under your exact title at 18:00 on the selected daily, weekly (Sunday), or monthly (first-day) cadence. YouTube flips them public one day after upload.
 
 ## Free mode notes
 

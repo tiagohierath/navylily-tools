@@ -112,11 +112,21 @@ Per lesson it opens the article in your browser to read aloud, records your mic
 - Renders with `make_videos.sh` (its own denoise disabled to avoid double
   processing) into `videos/output/`.
 
-The daily `youtube_upload.py` timer then posts one/day **private**, titled with
-the real article title, scheduled to go **public** after `YT_PUBLISH_AFTER_DAYS`
-(default 1), a window to set the title + thumbnail. Recorded state is detected
-from disk (a `videos/audio/*.wav` or `videos/output/*.mp4`), so there's nothing
-to track by hand.
+The `youtube_upload.py` timer runs at 18:00 São Paulo. Set its persistent
+cadence to daily, weekly (Sunday), or monthly (the first day) with
+`./youtube_upload.sh --cadence ...`. Videos are **private**, titled with the real
+article title, and scheduled to go **public** after `YT_PUBLISH_AFTER_DAYS`
+(default 1), giving you a window to set the thumbnail. Recorded state is
+detected from disk (a `videos/audio/*.wav` or `videos/output/*.mp4`), so
+there's nothing to track by hand.
+
+Change the posting cadence anytime:
+
+```bash
+./youtube_upload.sh --cadence daily
+./youtube_upload.sh --cadence weekly
+./youtube_upload.sh --cadence monthly
+```
 
 ## License
 

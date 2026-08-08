@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
-# install_timer.sh, install a *user* systemd timer that runs the uploader
-# once a day at 18:00 America/Sao_Paulo, posting one private video if any are
-# waiting. Designed to be fully hands-off: install once and forget.
+# install_timer.sh, install a *user* systemd timer that runs the uploader at
+# 18:00 São Paulo (21:00 UTC), every day. The uploader's persistent cadence
+# setting chooses daily, Sunday-only, or first-of-month posting.
+# It posts one private video if any are waiting. Designed to be fully hands-off.
 #
 # The uploader's own guards make it safe even if the timer misfires or overlaps,
 # so the timer only has to be roughly right. This writes to ~/.config/systemd/
@@ -54,14 +55,17 @@ Restart=on-failure
 RestartSec=5min
 EOF
 
-# OnCalendar honours the timezone you name explicitly (systemd >= 252).
+# Use UTC explicitly: this systemd environment lacks named IANA zoneinfo data,
+# which otherwise causes America/Sao_Paulo to be interpreted as UTC. São Paulo
+# is UTC-3 (Brazil currently has no daylight-saving time), hence 21:00 UTC.
 cat > "$TIMER" <<EOF
 [Unit]
-Description=Navylily YouTube upload, daily 18:00 America/Sao_Paulo
+Description=Navylily YouTube upload, 18:00 São Paulo
 
 [Timer]
-OnCalendar=*-*-* 18:00:00 America/Sao_Paulo
-# Run as soon as possible after a missed slot (laptop was asleep/off at 18:00).
+# The uploader enforces its selected daily/weekly/monthly cadence itself.
+OnCalendar=*-*-* 21:00:00 UTC
+# Run as soon as possible after a missed slot (laptop asleep/off at 18:00).
 Persistent=true
 
 [Install]

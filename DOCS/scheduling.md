@@ -1,6 +1,6 @@
 # scheduling.md
 
-`install_timer.sh` sets up a user systemd timer that runs the uploader every day at 18:00 São Paulo time. The uploader's own guards make this safe even if the timer misfires or runs twice.
+`install_timer.sh` sets up a user systemd timer that runs the uploader daily at 18:00 São Paulo time. The uploader's persistent cadence setting decides whether it posts daily, weekly on Sunday, or monthly on the first day. The guards make this safe even if the timer misfires or runs twice.
 
 ## Commands
 
@@ -16,14 +16,14 @@ systemctl --user start navylily-youtube.service       # run it right now
 
 ## What it installs
 
-Two files in `~/.config/systemd/user/` (nothing system-wide): a service that runs `youtube_upload.sh`, and a timer with `OnCalendar=*-*-* 18:00:00 America/Sao_Paulo` and `Persistent=true` (a run missed while the machine was off happens at next boot).
+Two files in `~/.config/systemd/user/` (nothing system-wide): a service that runs `youtube_upload.sh`, and a daily 18:00 São Paulo timer. `Persistent=true` means a run missed while the machine was off happens at next boot.
 
 ## Changing it
 
 Edit `install_timer.sh` and run it again:
 
-- Different time: change the `OnCalendar` line.
-- Weekly instead of daily: `OnCalendar=Mon *-*-* 18:00:00 America/Sao_Paulo`, and add `Environment=YT_MIN_HOURS_BETWEEN=168` to the service block as a second guard.
+- Different day or time: change the `OnCalendar` lines (e.g. `Wed *-*-* 09:00:00 America/Sao_Paulo`).
+- Switch cadence anytime: `./youtube_upload.sh --cadence daily`, `--cadence weekly`, or `--cadence monthly`. Weekly posts on Sundays; monthly posts on the first day.
 - Don't catch up missed runs: `Persistent=false`.
 
 ## Prefer declarative NixOS?
@@ -38,7 +38,7 @@ systemd.user.services.navylily-youtube = {
 systemd.user.timers.navylily-youtube = {
   wantedBy = [ "timers.target" ];
   timerConfig = {
-    OnCalendar = "*-*-* 18:00:00 America/Sao_Paulo";
+    OnCalendar = "*-*-* 21:00:00 UTC"; # 18:00 São Paulo
     Persistent = true;
   };
 };

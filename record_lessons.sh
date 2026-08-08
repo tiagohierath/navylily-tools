@@ -9,16 +9,17 @@
 #      from files on disk (see lessons.py), nothing to track by hand.
 #   2. Opens the article in your browser so you can read while you speak.
 #   3. Records the mic with ffmpeg (press q in ffmpeg to stop).
-#   4. Guards the take: under MIN_MINUTES (default 6) or near-silent peaks are
+#   4. Guards the take: under MIN_MINUTES (default 0, off) or near-silent peaks are
 #      treated as misfires and discarded, then you re-record or skip. A kept
 #      take can be played back first ([L]isten).
 #   5. Processes the voice (light by default: highpass, lowpass, loudnorm) and
 #      renders the video in the background, serialized by a lock.
 #   6. Writes the article title next to the mp4; youtube_upload.py posts it
-#      under that exact wiki title, PRIVATE, one per day, and YouTube flips it
-#      public automatically after YT_PUBLISH_AFTER_DAYS days (default 1).
+#      under that exact wiki title, PRIVATE, on the selected daily, weekly, or
+#      monthly cadence at 18:00, and
+#      YouTube flips it public automatically after YT_PUBLISH_AFTER_DAYS (1).
 #
-# This script never uploads anything itself; the daily timer does the posting.
+# This script never uploads anything itself; the scheduled timer does the posting.
 #
 # Usage:
 #   ./record_lessons.sh                # work through un-recorded lessons
@@ -31,7 +32,7 @@
 #
 # Env overrides:
 #   MIC=default          pulse source (default = system default mic, the FIFINE)
-#   MIN_MINUTES=6        reject recordings shorter than this
+#   MIN_MINUTES=0        reject recordings shorter than this (0 = no minimum)
 #   CLEAN=light          light (default) / full (audio-clean.sh) / raw (none)
 #   WIKI_DIR=...         where the article .md files live
 #   NO_BROWSER=1         do not open the article in a browser
@@ -41,7 +42,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MIC="${MIC:-default}"   # pulse default source (the FIFINE AM8 on this machine)
-MIN_MINUTES="${MIN_MINUTES:-6}"
+MIN_MINUTES="${MIN_MINUTES:-0}"
 MIN_SECONDS="$(awk -v m="$MIN_MINUTES" 'BEGIN{printf "%.0f", m*60}')"
 
 # Voice processing. Default is LIGHT: high-pass the desk rumble, gentle
@@ -50,9 +51,44 @@ MIN_SECONDS="$(awk -v m="$MIN_MINUTES" 'BEGIN{printf "%.0f", m*60}')"
 # denoise disabled (below), so this is the ONLY processing the voice gets.
 #   CLEAN=full   the heavier audio-clean.sh (RNNoise + EQ + compressor)
 #   CLEAN=raw    no processing at all, the capture is used as-is
-#   CLEAN_AF=... override the light filter chain
+#   CLEAN_PRE_AF=...  override the pre-loudnorm filters (highpass/lowpass/gain)
+#   CLEAN_LOUDNORM_I=-13  override the loudnorm target (YouTube standard is -14
+#                         LUFS; targeting -13 gives margin since the true-peak
+#                         ceiling below still caps it from ever clipping, and
+#                         quiet is worse than loud here)
+#
+# loudnorm runs two-pass (measure, then apply with the measured values):
+# single-pass loudnorm only estimates loudness from a short analysis window and
+# on this FIFINE AM8 (quiet output level) it was undercorrecting by 6-8 dB
+# (measured -22 LUFS on output vs a -16 target), which is why the voice sounded
+# too low on YouTube. Two-pass measures the whole file first, so it actually
+# hits the target.
 CLEAN="${CLEAN:-light}"
-CLEAN_AF="${CLEAN_AF:-highpass=f=80,lowpass=f=14000,loudnorm=I=-16:TP=-1.5:LRA=11}"
+CLEAN_PRE_AF="${CLEAN_PRE_AF:-highpass=f=80,lowpass=f=14000}"
+CLEAN_LOUDNORM_I="${CLEAN_LOUDNORM_I:--13}"
+
+# Two-pass loudnorm: $1 input wav, $2 output wav. Uses $FFMPEG/$CLEAN_PRE_AF/
+# $CLEAN_LOUDNORM_I from the enclosing scope.
+two_pass_loudnorm() {
+    local in="$1" out="$2" tp="-1.5" lra=11
+    local measure_af="${CLEAN_PRE_AF},loudnorm=I=${CLEAN_LOUDNORM_I}:TP=${tp}:LRA=${lra}:print_format=json"
+    local json; json="$("${FFMPEG[@]}" -hide_banner -nostats -loglevel info -i "$in" -af "$measure_af" -f null - 2>&1)"
+    local mi mtp mlra mthresh moffset
+    mi="$(printf '%s\n' "$json" | sed -n 's/.*"input_i" *: *"\(-\?[0-9.]*\)".*/\1/p' | head -1)"
+    mtp="$(printf '%s\n' "$json" | sed -n 's/.*"input_tp" *: *"\(-\?[0-9.]*\)".*/\1/p' | head -1)"
+    mlra="$(printf '%s\n' "$json" | sed -n 's/.*"input_lra" *: *"\(-\?[0-9.]*\)".*/\1/p' | head -1)"
+    mthresh="$(printf '%s\n' "$json" | sed -n 's/.*"input_thresh" *: *"\(-\?[0-9.]*\)".*/\1/p' | head -1)"
+    moffset="$(printf '%s\n' "$json" | sed -n 's/.*"target_offset" *: *"\(-\?[0-9.]*\)".*/\1/p' | head -1)"
+    if [[ -z "$mi" || -z "$mtp" || -z "$mlra" || -z "$mthresh" || -z "$moffset" ]]; then
+        echo "two_pass_loudnorm: measure pass failed, falling back to single-pass" >&2
+        "${FFMPEG[@]}" -hide_banner -loglevel error -y -i "$in" \
+            -af "${CLEAN_PRE_AF},loudnorm=I=${CLEAN_LOUDNORM_I}:TP=${tp}:LRA=${lra}" -ar 48000 "$out"
+        return
+    fi
+    "${FFMPEG[@]}" -hide_banner -loglevel error -y -i "$in" \
+        -af "${CLEAN_PRE_AF},loudnorm=I=${CLEAN_LOUDNORM_I}:TP=${tp}:LRA=${lra}:measured_I=${mi}:measured_TP=${mtp}:measured_LRA=${mlra}:measured_thresh=${mthresh}:offset=${moffset}:linear=true" \
+        -ar 48000 "$out"
+}
 
 VIDEOS_DIR="$HERE/videos"
 AUDIO_DIR="${AUDIO_DIR:-$VIDEOS_DIR/audio}"
@@ -94,6 +130,15 @@ else
 fi
 
 py() { python3 "$HERE/lessons.py" "$@"; }
+
+# Short, stable per-lesson id: first 6 hex of sha256(slug), git-short-SHA style,
+# so every published mp4 gets a unique handle you can match a thumbnail to later
+# (e.g. b32b11_zona_de_conforto.mp4). It's a pure function of the slug, so a
+# re-record or a crash-recovery render of the SAME lesson reuses the SAME id
+# (same filename) and overwrites in place, never leaving a second file that would
+# get posted twice. The slug stays in the name too, so even a hash collision
+# can't make two different lessons collide on one filename.
+lesson_id() { printf '%s' "$1" | sha256sum | cut -c1-6; }
 
 # WAV duration in whole seconds, read straight from the header (no ffprobe dep).
 wav_seconds() {
@@ -220,6 +265,7 @@ progress_bar() {
 launch_render() {
     local slug="$1" title="$2" raw="${3:-}"
     local dest="$AUDIO_DIR/${slug}.wav"
+    local id; id="$(lesson_id "$slug")"
     set -m
     (
         trap '' INT HUP
@@ -233,15 +279,15 @@ launch_render() {
                 case "$CLEAN" in
                     full) "$HERE/audio-clean.sh" "$raw" "$dest" ;;
                     raw)  cp -f "$raw" "$dest" ;;
-                    *)    "${FFMPEG[@]}" -hide_banner -loglevel error -y -i "$raw" \
-                              -af "$CLEAN_AF" -ar 48000 "$dest" ;;
+                    *)    two_pass_loudnorm "$raw" "$dest" ;;
                 esac
             } >>"$RENDER_LOG" 2>&1 || clean_ok=0
         fi
         if (( clean_ok )) \
            && rm -f "$OUTPUT_DIR/${slug}.mp4" \
-           && VOICE_DENOISE= "$HERE/make_videos.sh" "$slug" >>"$RENDER_LOG" 2>&1; then
-            echo "    OK $OUTPUT_DIR/${slug}.mp4" >>"$RENDER_LOG"
+           && VOICE_DENOISE= "$HERE/make_videos.sh" "$slug" >>"$RENDER_LOG" 2>&1 \
+           && mv -f "$OUTPUT_DIR/${slug}.mp4" "$OUTPUT_DIR/${id}_${slug}.mp4"; then
+            echo "    OK $OUTPUT_DIR/${id}_${slug}.mp4" >>"$RENDER_LOG"
             notify "Navy Lily" "Rendered: $title"
         else
             echo "    FAILED render for $slug (see above)" >>"$RENDER_LOG"
@@ -321,9 +367,9 @@ echo "Navy Lily · lesson recorder"
 progress_bar
 echo "  mic $(resolved_mic) · min ${MIN_MINUTES}m · clean $CLEAN"
 if systemctl --user is-active navylily-youtube.timer >/dev/null 2>&1; then
-    echo "  posting  ✓ on — auto-posts PRIVATE, 1/day, public after 24h"
+    echo "  posting  ✓ on: selected daily/weekly/monthly cadence at 18:00"
 else
-    echo "  posting  ✗ OFF — takes will render + queue but NOT post"
+    echo "  posting  ✗ OFF: takes will render + queue but NOT post"
     echo "           arm once: ./youtube_upload.sh --authorize && ./install_timer.sh"
 fi
 
@@ -335,8 +381,11 @@ _healed=0
 shopt -s nullglob
 for _wav in "$AUDIO_DIR"/*.wav; do
     _s="$(basename "$_wav" .wav)"
-    [[ -f "$OUTPUT_DIR/${_s}.mp4" ]] && continue
-    _t="$_s"; [[ -f "$OUTPUT_DIR/${_s}.title.txt" ]] && _t="$(cat "$OUTPUT_DIR/${_s}.title.txt")"
+    _id="$(lesson_id "$_s")"
+    # Finished already? Skip if the id-named mp4 exists, OR a legacy slug-named
+    # one from before the id scheme (never re-render/re-post those).
+    [[ -f "$OUTPUT_DIR/${_id}_${_s}.mp4" || -f "$OUTPUT_DIR/${_s}.mp4" ]] && continue
+    _t="$_s"; [[ -f "$OUTPUT_DIR/${_id}_${_s}.title.txt" ]] && _t="$(cat "$OUTPUT_DIR/${_id}_${_s}.title.txt")"
     launch_render "$_s" "$_t"
     _healed=$(( _healed + 1 ))
 done
@@ -354,7 +403,7 @@ while :; do
         slug="$(py slug "$title")"
         html_path=""
         FREE_TITLE=""   # next round asks again
-        if [[ -f "$OUTPUT_DIR/${slug}.mp4" || -f "$AUDIO_DIR/${slug}.wav" ]]; then
+        if [[ -f "$OUTPUT_DIR/$(lesson_id "$slug")_${slug}.mp4" || -f "$OUTPUT_DIR/${slug}.mp4" || -f "$AUDIO_DIR/${slug}.wav" ]]; then
             read -r -p "'$slug' already exists. Overwrite it? [y/N] " a || exit 0
             [[ "$a" =~ ^[Yy] ]] || continue
         fi
@@ -429,10 +478,10 @@ while :; do
         start=$SECONDS
         while kill -0 "$rec_pid" 2>/dev/null; do
             e=$(( SECONDS - start ))
-            if (( e >= MIN_SECONDS )); then
-                printf '\r%-72s' "  ● REC  $(fmt_mmss "$e")   ✓ past ${MIN_MINUTES}min — press ENTER to stop"
-            else
+            if (( MIN_SECONDS > 0 && e < MIN_SECONDS )); then
                 printf '\r%-72s' "  ● REC  $(fmt_mmss "$e")   need ${MIN_MINUTES}min, keep going…"
+            else
+                printf '\r%-72s' "  ● REC  $(fmt_mmss "$e")   press ENTER to stop"
             fi
             # read completes only on ENTER (a full line); a lone stray key won't
             # trip it. On the ~1s timeout the loop just re-ticks the timer.
@@ -502,9 +551,10 @@ while :; do
     # is still reading. Harmless in --new mode (no picker consults SKIP_SLUGS).
     SKIP_SLUGS="$SKIP_SLUGS $slug"
 
-    # Title sidecar next to the eventual mp4; youtube_upload.py reads this and
-    # posts under the real wiki title instead of a random one.
-    printf '%s\n' "$title" > "$OUTPUT_DIR/${slug}.title.txt"
+    # Title sidecar next to the eventual mp4 (SAME id-prefixed basename the mp4
+    # will get), so youtube_upload.py reads it and posts under the real wiki
+    # title instead of a random one.
+    printf '%s\n' "$title" > "$OUTPUT_DIR/$(lesson_id "$slug")_${slug}.title.txt"
 
     # Hand off to the background: voice-clean this raw take, then render. You're
     # back at the next prompt instantly; the job runs niced and freezes while you
@@ -513,7 +563,7 @@ while :; do
 
     SESSION_RECORDED=$(( SESSION_RECORDED + 1 ))
     (( FREE_MODE )) || DONE_THIS_SESSION=$(( DONE_THIS_SESSION + 1 ))
-    echo "✓ '$title' saved · rendering in background · auto-posts PRIVATE (1/day, public in 24h)"
+    echo "✓ '$title' saved · rendering in background · auto-posts PRIVATE (1/day, public ~24h after upload)"
     (( FREE_MODE )) || progress_bar
     [[ -n "$html_path" ]] && rm -f "$html_path"
     echo

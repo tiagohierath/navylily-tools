@@ -8,12 +8,12 @@ recording/upload support.
 - [record-lessons.md](record-lessons.md): record narration videos from the terminal (wiki articles or any topic)
 - [make-videos.md](make-videos.md): turn audio + images into YouTube-ready videos
 - [audio-clean.md](audio-clean.md): clean raw mic audio by itself
-- [youtube-upload.md](youtube-upload.md): upload one video per week to YouTube, private
-- [scheduling.md](scheduling.md): the weekly Sunday 13:00 timer that runs the uploader
+- [youtube-upload.md](youtube-upload.md): upload queued videos to YouTube, private
+- [scheduling.md](scheduling.md): selectable daily, weekly, or monthly posting
 
 ## The whole pipeline in one line
 
-Record with `record_lessons.sh`, it cleans the voice and renders the video by itself, and the weekly timer posts one private on YouTube every Sunday. A few days later YouTube makes it public. You only talk.
+Record with `record_lessons.sh`, it cleans the voice and renders the video by itself. The timer posts at 18:00 on your selected daily, weekly, or monthly cadence. A day later YouTube makes it public. You only talk.
 
 ## Quick start
 

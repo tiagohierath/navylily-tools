@@ -9,9 +9,10 @@ thumbnail and publish manually later.
 It is built to be *physically incapable* of over-posting, with three
 independent safety mechanisms (any one of them alone stops a bad run):
 
-  1. Persistent daily state, a JSON state file records the date of the last
-     upload and which files have already been uploaded. If today already has an
-     upload (or the per-upload cooldown hasn't elapsed), the run exits at once.
+  1. Persistent cadence state, a JSON state file records the time of the last
+     upload and which files have already been uploaded. If today already has
+     an upload (or the per-upload cooldown hasn't elapsed), the run exits at
+     once.
 
   2. Hard single-item rule, each run selects exactly ONE video and uploads
      only that one. There is no batch/loop over the folder in live mode. Leftover
@@ -22,8 +23,10 @@ independent safety mechanisms (any one of them alone stops a bad run):
      running, this one exits immediately.
 
 Plus: a file is never uploaded twice, every successful upload is appended to
-the state's "uploaded" list (keyed by content hash + name), and such files are
-skipped forever.
+the state's "uploaded" list (keyed by a full content hash), and such files are
+skipped forever. Before an API request, a durable pending-upload record is
+written. If the process crashes after YouTube accepts the upload, the next run
+stops for reconciliation instead of risking a duplicate.
 
 Credentials (NOT in the repo):
   - client_secret.json : OAuth client (Desktop app) from Google Cloud Console.
@@ -36,9 +39,10 @@ Usage:
   ./youtube_upload.py --status       # print state and exit
   ./youtube_upload.py --authorize    # just run the OAuth flow and store token
 
-Scheduling (6pm America/Sao_Paulo, once a day) is handled outside this script;
-see install_timer.sh / the README. The script itself does not trust the
-scheduler, the guards above hold even if it's triggered 20 times.
+Scheduling is handled outside this script; see install_timer.sh. Use
+`--cadence daily`, `--cadence weekly`, or `--cadence monthly` to switch the
+persistent posting cadence. The script itself does not trust the scheduler:
+its guards hold even if it is triggered 20 times.
 """
 
 from __future__ import annotations
@@ -71,33 +75,35 @@ CLIENT_SECRET = Path(os.environ.get(
     "YT_CLIENT_SECRET", str(STATE_DIR / "client_secret.json")))
 TOKEN_FILE = Path(os.environ.get("YT_TOKEN", str(STATE_DIR / "token.json")))
 
-# Timezone for "one upload per calendar day".
+# Timezone for the calendar-based upload guards.
 UPLOAD_TZ = os.environ.get("YT_TZ", "America/Sao_Paulo")
 
-# Minimum hours between two uploads. This is the ONLY thing that enforces
-# posting cadence: it works regardless of how often the timer fires (daily,
-# hourly retries, manual runs) by blocking any upload until enough time has
-# passed since the last one. The value must sit *below* the target interval,
-# never exactly on it, because the daily 18:00 timer fires a few minutes
-# BEFORE the previous run's finish-timestamp + interval, so an exact floor
-# fails the fence-post and slips a day:
-#   * DAILY  (pre-2027): 12h, not 24h. A 24h floor would make an 18:00 fire
-#     land <24h after yesterday's 18:0x finish and skip to the next day
-#     (posting every other day). 12h can never block the next day's fire.
-#   * WEEKLY (2027-01-01 on): 156h (6.5 days), not 168h. Exactly 168h makes
-#     each weekly fire land ~167.9h after the last finish, just under the
-#     floor, so it slips to the next day and drifts (posts every 8 days on a
-#     walking weekday). 156h blocks the 6 intervening daily fires but clears
-#     comfortably before the 7th, giving a steady same-weekday post with no
-#     separate weekly timer to maintain.
-WEEKLY_FROM_DATE = dt.date(2027, 1, 1)
+# The selected cadence is persisted in state.json by --cadence.
+DEFAULT_CADENCE = os.environ.get("YT_CADENCE_DEFAULT", "daily")
+VALID_CADENCES = {"daily", "weekly", "monthly"}
 
 
-def min_hours_between() -> float:
+def cadence(state: dict) -> str:
+    value = state.get("cadence", DEFAULT_CADENCE)
+    return value if value in VALID_CADENCES else DEFAULT_CADENCE
+
+
+def min_hours_between(state: dict) -> float:
+    """Avoid a daily fence-post failure when one run finishes slightly late."""
     override = os.environ.get("YT_MIN_HOURS_BETWEEN")
     if override is not None:
         return float(override)
-    return 156.0 if now_local().date() >= WEEKLY_FROM_DATE else 12.0
+    return 20.0 if cadence(state) == "daily" else 0.0
+
+
+def cadence_schedule_block(state: dict) -> str | None:
+    """Return a reason when a weekly/monthly schedule blocks the current day."""
+    now = now_local()
+    if cadence(state) == "weekly" and now.weekday() != 6:
+        return "Weekly schedule: uploads run only on Sundays."
+    if cadence(state) == "monthly" and now.day != 1:
+        return "Monthly schedule: uploads run only on the first day of each month."
+    return None
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 
@@ -119,8 +125,7 @@ TITLE_WORDS_B = [
 
 # Description applied to every uploaded video. Edit freely.
 VIDEO_DESCRIPTION = """\
-NavyLilyWorks:
-https://navylily.tv/
+Curso gratuito: https://navylily.tv/
 
 Curso de desenho: https://navylily.tv/navy
 Wiki: https://navylily.tv/wiki
@@ -158,40 +163,80 @@ def now_local() -> dt.datetime:
 
 
 def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {"last_upload_iso": None, "uploaded": []}
+    if not STATE_FILE.exists():
+        return {"last_upload_iso": None, "uploaded": []}
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        raise RuntimeError(
+            f"Cannot safely read upload state at {STATE_FILE}: {e}. "
+            "Refusing to upload because treating it as empty could repost videos."
+        ) from e
+    if not isinstance(state, dict) or not isinstance(state.get("uploaded", []), list):
+        raise RuntimeError(
+            f"Invalid upload state at {STATE_FILE}. Refusing to upload safely.")
+    return state
 
 
 def save_state(state: dict) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(STATE_DIR, 0o700)
     tmp = STATE_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    os.chmod(tmp, 0o600)
     tmp.replace(STATE_FILE)  # atomic
 
 
 def file_key(path: Path) -> str:
-    """Stable identity for a video: size + a hash of head/tail + name."""
+    """Stable identity for video bytes, unchanged if the file is renamed."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def legacy_file_key(path: Path) -> str:
+    """Pre-2026-08 identity, retained only to avoid reposting old state."""
     h = hashlib.sha256()
     h.update(path.name.encode())
-    try:
-        size = path.stat().st_size
-        h.update(str(size).encode())
-        with path.open("rb") as f:
-            h.update(f.read(1 << 20))           # first 1 MiB
-            if size > (1 << 20):
-                f.seek(-(1 << 20), os.SEEK_END)
-                h.update(f.read(1 << 20))       # last 1 MiB
-    except OSError:
-        pass
+    size = path.stat().st_size
+    h.update(str(size).encode())
+    with path.open("rb") as f:
+        h.update(f.read(1 << 20))
+        if size > (1 << 20):
+            f.seek(-(1 << 20), os.SEEK_END)
+            h.update(f.read(1 << 20))
     return h.hexdigest()
 
 
 def already_uploaded_keys(state: dict) -> set[str]:
     return {e["key"] for e in state.get("uploaded", []) if "key" in e}
+
+
+def was_uploaded(path: Path, state: dict) -> bool:
+    """Recognize both current content-only and older filename-based records."""
+    done = already_uploaded_keys(state)
+    return file_key(path) in done or legacy_file_key(path) in done
+
+
+def pending_upload(state: dict) -> dict | None:
+    pending = state.get("pending_upload")
+    return pending if isinstance(pending, dict) else None
+
+
+def record_uploaded(state: dict, pending: dict, video_id: str) -> None:
+    """Finalize a pending record after an upload is known to exist."""
+    url = f"https://youtu.be/{video_id}"
+    state["last_upload_iso"] = now_local().isoformat()
+    state.setdefault("uploaded", []).append({
+        "key": pending["key"],
+        "name": pending["name"],
+        "video_id": video_id,
+        "url": url,
+        "uploaded_iso": now_local().isoformat(),
+    })
+    state.pop("pending_upload", None)
 
 
 def cooldown_remaining(state: dict) -> float:
@@ -206,7 +251,7 @@ def cooldown_remaining(state: dict) -> float:
     if last_dt.tzinfo is None:
         last_dt = last_dt.astimezone()
     elapsed_h = (now_local() - last_dt).total_seconds() / 3600.0
-    return max(0.0, min_hours_between() - elapsed_h)
+    return max(0.0, min_hours_between(state) - elapsed_h)
 
 
 def uploaded_today(state: dict) -> bool:
@@ -222,14 +267,8 @@ def uploaded_today(state: dict) -> bool:
     return last_dt.date() == now_local().date()
 
 
-def uploaded_this_week(state: dict) -> bool:
-    """True if an upload already happened in the current ISO week (Mon-Sun).
-
-    This is the hard, timer-independent weekly cap: unlike the 156h cooldown it
-    cannot be squeezed under a week by an odd-hour boot/catch-up fire, because
-    it keys on the calendar week itself, not elapsed hours. Only consulted once
-    weekly cadence is in effect (see WEEKLY_FROM_DATE); before then the daily
-    cap governs and this must never run, or it would block daily posting."""
+def uploaded_this_month(state: dict) -> bool:
+    """True if an upload already happened in the current local calendar month."""
     last = state.get("last_upload_iso")
     if not last:
         return False
@@ -239,22 +278,33 @@ def uploaded_this_week(state: dict) -> bool:
         return False
     if last_dt.tzinfo is None:
         last_dt = last_dt.astimezone()
-    last_y, last_w, _ = last_dt.isocalendar()
-    now_y, now_w, _ = now_local().isocalendar()
-    return (last_y, last_w) == (now_y, now_w)
+    now = now_local()
+    return (last_dt.year, last_dt.month) == (now.year, now.month)
+
+
+def uploaded_this_week(state: dict) -> bool:
+    last = state.get("last_upload_iso")
+    if not last:
+        return False
+    try:
+        last_dt = dt.datetime.fromisoformat(last)
+    except ValueError:
+        return False
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.astimezone()
+    return last_dt.isocalendar()[:2] == now_local().isocalendar()[:2]
 
 
 # ---------------------------------------------------------------------------
 # Selection, exactly one not-yet-uploaded video, oldest first.
 # ---------------------------------------------------------------------------
 def pick_video(state: dict) -> Path | None:
-    done = already_uploaded_keys(state)
     candidates = [
         p for p in sorted(OUTPUT_DIR.glob("*"))
         if p.is_file() and p.suffix.lower() in VIDEO_EXTS
     ]
     for p in sorted(candidates, key=lambda p: p.stat().st_mtime):
-        if file_key(p) not in done:
+        if not was_uploaded(p, state):
             return p
     return None
 
@@ -304,7 +354,7 @@ def get_service(run_oauth: bool = True):
             # prompt="select_account consent" forces Google's account picker
             # every time (otherwise it silently reuses whichever account the
             # browser is signed into). access_type="offline" guarantees a
-            # refresh token so unattended daily runs never need re-login.
+            # refresh token so unattended scheduled runs never need re-login.
             creds = flow.run_local_server(
                 port=0,
                 access_type="offline",
@@ -312,7 +362,8 @@ def get_service(run_oauth: bool = True):
             )
         else:
             sys.exit("No valid token and OAuth disabled.")
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(STATE_DIR, 0o700)
         TOKEN_FILE.write_text(creds.to_json())
         os.chmod(TOKEN_FILE, 0o600)
     return build("youtube", "v3", credentials=creds)
@@ -400,16 +451,27 @@ def upload(service, path: Path, title: str) -> str:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Upload one video/day to YouTube.")
+    ap = argparse.ArgumentParser(
+        description="Upload one video to YouTube on the configured cadence.")
     ap.add_argument("--dry-run", action="store_true",
                     help="run all guards and selection, but do not upload")
     ap.add_argument("--status", action="store_true",
                     help="print current state and exit")
     ap.add_argument("--authorize", action="store_true",
                     help="run the OAuth flow, store the token, and exit")
+    ap.add_argument("--cadence", choices=sorted(VALID_CADENCES),
+                    help="persistently switch between daily, weekly, and monthly")
+    ap.add_argument("--resolve-pending", metavar="VIDEO_ID",
+                    help="record a verified pending upload, then resume the queue")
+    ap.add_argument("--discard-pending", action="store_true",
+                    help="discard a verified-not-uploaded pending record")
     args = ap.parse_args()
 
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    if args.resolve_pending and args.discard_pending:
+        ap.error("--resolve-pending and --discard-pending cannot be used together")
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(STATE_DIR, 0o700)
 
     # ---- Safety #3: run lock (taken first, held for the whole run). --------
     lock_fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_RDWR, 0o600)
@@ -420,17 +482,21 @@ def main() -> int:
         return 0
 
     state = load_state()
+    pending = pending_upload(state)
 
     if args.status:
         print(json.dumps({
             "now_local": now_local().isoformat(),
             "last_upload_iso": state.get("last_upload_iso"),
             "uploaded_today": uploaded_today(state),
+            "uploaded_this_month": uploaded_this_month(state),
             "uploaded_this_week": uploaded_this_week(state),
-            "weekly_cap_active": now_local().date() >= WEEKLY_FROM_DATE,
-            "min_hours_between": min_hours_between(),
+            "cadence": cadence(state),
+            "min_hours_between": min_hours_between(state),
+            "cadence_schedule_block": cadence_schedule_block(state),
             "cooldown_remaining_h": round(cooldown_remaining(state), 2),
             "uploaded_count": len(state.get("uploaded", [])),
+            "pending_upload": pending,
             "publish_after_days": PUBLISH_AFTER_DAYS,
             "output_dir": str(OUTPUT_DIR),
         }, indent=2, ensure_ascii=False))
@@ -441,12 +507,50 @@ def main() -> int:
         print(f"Token stored at {TOKEN_FILE}")
         return 0
 
-    # ---- Safety #1: persistent daily / weekly / cooldown state. -----------
-    if uploaded_today(state):
-        print("Already uploaded today, exiting (hard daily cap).")
+    if args.cadence:
+        state["cadence"] = args.cadence
+        save_state(state)
+        print(f"Posting cadence set to {args.cadence}.")
         return 0
-    if now_local().date() >= WEEKLY_FROM_DATE and uploaded_this_week(state):
-        print("Already uploaded this week, exiting (hard weekly cap).")
+
+    if args.resolve_pending:
+        if not pending:
+            print("No pending upload to resolve.")
+            return 0
+        record_uploaded(state, pending, args.resolve_pending)
+        save_state(state)
+        print(f"Pending upload recorded: https://youtu.be/{args.resolve_pending}")
+        return 0
+
+    if args.discard_pending:
+        if not pending:
+            print("No pending upload to discard.")
+            return 0
+        state.pop("pending_upload", None)
+        save_state(state)
+        print("Pending upload discarded; the video may be retried on the next run.")
+        return 0
+
+    if pending:
+        print("A previous upload is pending reconciliation; refusing to risk a "
+              "duplicate. Check YouTube Studio, then run either:\n"
+              f"  {Path(__file__).name} --resolve-pending VIDEO_ID\n"
+              f"  {Path(__file__).name} --discard-pending")
+        return 1
+
+    # ---- Safety #1: persistent same-day + cadence state. ------------------
+    if uploaded_today(state):
+        print("Already uploaded today, exiting (same-day guard).")
+        return 0
+    schedule_block = cadence_schedule_block(state)
+    if schedule_block:
+        print(schedule_block)
+        return 0
+    if cadence(state) == "weekly" and uploaded_this_week(state):
+        print("Already uploaded this week, exiting (weekly guard).")
+        return 0
+    if cadence(state) == "monthly" and uploaded_this_month(state):
+        print("Already uploaded this month, exiting (monthly guard).")
         return 0
     remaining = cooldown_remaining(state)
     if remaining > 0:
@@ -471,21 +575,35 @@ def main() -> int:
         print("[dry-run] would upload the above; state NOT modified.")
         return 0
 
-    service = get_service(run_oauth=False if TOKEN_FILE.exists() else True)
-    video_id = upload(service, video, title)
-    url = f"https://youtu.be/{video_id}"
-    print(f"Uploaded (private): {url}")
-
-    # Record success, date stamp (caps the day) + file identity (never twice).
-    state["last_upload_iso"] = now_local().isoformat()
-    state.setdefault("uploaded", []).append({
+    # Persist intent before the non-transactional YouTube request. A power loss
+    # after YouTube accepts it leaves this record behind and fails closed next
+    # time, rather than uploading the same video again.
+    pending = {
         "key": file_key(video),
         "name": video.name,
-        "video_id": video_id,
-        "url": url,
-        "uploaded_iso": now_local().isoformat(),
-    })
+        "title": title,
+        "started_iso": now_local().isoformat(),
+    }
+    state["pending_upload"] = pending
     save_state(state)
+
+    try:
+        service = get_service(run_oauth=False if TOKEN_FILE.exists() else True)
+    except Exception:
+        # Authentication failed before an upload request was issued, so retrying
+        # later is safe.
+        state.pop("pending_upload", None)
+        save_state(state)
+        raise
+
+    # Deliberately do not catch upload exceptions. A timeout or dropped response
+    # may happen after YouTube accepted the video, so leaving the pending record
+    # is safer than automatically retrying and creating a duplicate.
+    video_id = upload(service, video, title)
+
+    record_uploaded(state, pending, video_id)
+    save_state(state)
+    print(f"Uploaded (private): https://youtu.be/{video_id}")
     print("State updated.")
     return 0
 

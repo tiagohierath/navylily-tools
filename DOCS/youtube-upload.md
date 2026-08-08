@@ -26,6 +26,20 @@ On top of that, every uploaded file is remembered by content hash, so the same v
 ./youtube_upload.sh               # upload one video if allowed
 ```
 
+## Queue a Movielily render
+
+From a Movielily project, render normally and then queue the last render:
+
+```bash
+movielily export filme exports/video/filme.mp4
+movielily youtube --title "Título do vídeo"
+nl-queue
+```
+
+Movielily places an immutable handoff in this shared queue, including the
+title sidecar. The selected cadence above applies normally. Use
+`movielily youtube --now` only for an intentional immediate private upload.
+
 ## First-time setup
 
 1. Google Cloud Console: enable YouTube Data API v3, create an OAuth client of type "Desktop app", download the JSON.

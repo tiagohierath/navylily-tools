@@ -25,3 +25,6 @@ videos/render.log
 # Python
 __pycache__/
 *.pyc
+
+# Local visual-reference tool checkout (large models and index data)
+pictogrep/

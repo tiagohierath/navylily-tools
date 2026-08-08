@@ -1,8 +1,8 @@
 # navylily-tools docs
 
-Simple guides for each script in this repo. These tools sit beside Bildkasten
-and movielily in the short-film workflow: Bildkasten helps gather/redraw
-images, movielily owns the text EDL and render, and navylily-tools handles
+Simple guides for each script in this repo. These tools sit beside Pictogrep
+and milklily in the short-film workflow: Pictogrep helps gather/redraw
+images, milklily owns the text EDL and render, and navylily-tools handles
 recording/upload support.
 
 - [record-lessons.md](record-lessons.md): record narration videos from the terminal (wiki articles or any topic)
@@ -42,7 +42,7 @@ DOCS/            this folder
 ~/.local/state/navylily-youtube/   YouTube secrets + upload state (never in the repo)
 ```
 
-For a movielily film project, use its clearer project folders instead:
+For a milklily film project, use its clearer project folders instead:
 
 ```
 scripts/                  writing and shot notes

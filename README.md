@@ -6,15 +6,15 @@ finished work to YouTube.
 
 This repo is part of a small film-making toolchain:
 
-- **Bildkasten** finds visual references and makes rough storyboard drawings.
-- **movielily** turns storyboards, images, audio, notes and text EDLs into a
+- **Pictogrep** finds visual references and makes rough storyboard drawings.
+- **milklily** turns storyboards, images, audio, notes and text EDLs into a
   timed animatic or finished render.
 - **navylily-tools** handles recording, batch video generation and YouTube
   upload chores.
 
 The scripts here are deliberately boring: mostly Bash or Python, easy to open
 in a file manager, easy to run directly, and friendly to the organized project
-folders created by movielily (`audio/`, `images/`, `refs/`, `storyboards/`,
+folders created by milklily (`audio/`, `images/`, `refs/`, `storyboards/`,
 `exports/`, etc.).
 
 Main tools:
@@ -52,7 +52,7 @@ videos/
   fonts/    Cormorant.ttf (condensed serif watermark)
 ```
 
-For movielily projects, prefer that project's own folders instead:
+For milklily projects, prefer that project's own folders instead:
 
 ```text
 audio/dialogue/     narration takes

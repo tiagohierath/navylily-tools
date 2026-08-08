@@ -89,8 +89,8 @@ def main() -> int:
         print(f"  last upload: {last.astimezone(TZ):%a %d %b %H:%M}")
     print()
     if not pending:
-        print("  Queue empty — render a Movielily video, then run:")
-        print("  movielily youtube --title \"Your video title\"\n")
+        print("  Queue empty — render a Milklily video, then run:")
+        print("  milklily youtube --title \"Your video title\"\n")
         return 0
 
     # Project the same selected cadence as youtube_upload.py.

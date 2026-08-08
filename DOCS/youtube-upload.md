@@ -26,19 +26,19 @@ On top of that, every uploaded file is remembered by content hash, so the same v
 ./youtube_upload.sh               # upload one video if allowed
 ```
 
-## Queue a Movielily render
+## Queue a Milklily render
 
-From a Movielily project, render normally and then queue the last render:
+From a Milklily project, render normally and then queue the last render:
 
 ```bash
-movielily export filme exports/video/filme.mp4
-movielily youtube --title "Título do vídeo"
+milklily export filme exports/video/filme.mp4
+milklily youtube --title "Título do vídeo"
 nl-queue
 ```
 
-Movielily places an immutable handoff in this shared queue, including the
+Milklily places an immutable handoff in this shared queue, including the
 title sidecar. The selected cadence above applies normally. Use
-`movielily youtube --now` only for an intentional immediate private upload.
+`milklily youtube --now` only for an intentional immediate private upload.
 
 ## First-time setup
 

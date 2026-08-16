@@ -7,7 +7,8 @@
 #
 # Stages: highpass 80 (rumble) - lowpass 16k (hiss ceiling) - arnndn (RNNoise
 # denoise, needs a .rnnn model) - eq -2dB@250 (de-box) - eq +2dB@3500
-# (presence) - acompressor (even dynamics).
+# (presence) - acompressor (even dynamics). attack=20 (was 5) so the
+# compressor doesn't clamp down fast enough to clip the start of words.
 
 # Repo root = parent of this lib/ dir.
 _VOICE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,7 +20,7 @@ VOICE_RNNOISE_MODEL="${RNNOISE_MODEL:-$_VOICE_ROOT/models/sh.rnnn}"
 # own loudnorm after it, e.g.  "$(voice_cleanup_chain),loudnorm=I=-14:..."
 voice_cleanup_chain() {
     printf '%s' \
-"highpass=f=80,lowpass=f=16000,arnndn=m='${VOICE_RNNOISE_MODEL}',equalizer=f=250:t=q:w=1:g=-2,equalizer=f=3500:t=q:w=1:g=2,acompressor=threshold=-18dB:ratio=3:attack=5:release=100"
+"volume=1.1,highpass=f=80,lowpass=f=16000,arnndn=m='${VOICE_RNNOISE_MODEL}',equalizer=f=250:t=q:w=1:g=-2,equalizer=f=3500:t=q:w=1:g=2,acompressor=threshold=-18dB:ratio=3:attack=20:release=100"
 }
 
 # True if ffmpeg (arg 1, or the one on PATH) has the arnndn filter.

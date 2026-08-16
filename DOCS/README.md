@@ -13,7 +13,9 @@ recording/upload support.
 
 ## The whole pipeline in one line
 
-Record with `record_lessons.sh`, it cleans the voice and renders the video by itself. The timer posts at 18:00 on your selected daily, weekly, or monthly cadence. A day later YouTube makes it public. You only talk.
+Record with `record_lessons.sh`; it cleans the voice and renders the video. The
+timer uploads privately at 09:00 on your selected cadence and YouTube makes it
+public at 18:00 the same day. A second timer verifies publication at 18:15.
 
 ## Quick start
 

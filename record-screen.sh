@@ -35,6 +35,7 @@
 #   ./record-screen.sh                 # record focused monitor + mic
 #   ./record-screen.sh my-lesson       # name it -> ...my-lesson.mp4
 #   MONITOR=DP-1 ./record-screen.sh    # force a specific output
+#   FPS=60 ./record-screen.sh          # override the framerate (default 30)
 #   MIC="alsa_input.usb-..." ./record-screen.sh   # force a specific mic source
 #   SYSTEM=1 ./record-screen.sh        # also capture system audio (music)
 #   SYS_GAIN_DB=-12 ./record-screen.sh # push the music further under the voice
@@ -62,6 +63,11 @@ HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 BASE_DIR="${VIDEO_BASE_DIR:-$HERE/videos}"
 OUTPUT_DIR="$BASE_DIR/output"          # final mp4 — same place make_videos.sh uses
 RAW_DIR="$BASE_DIR/recordings"         # raw mkv recordings (kept)
+# Where an UNTITLED screen recording lands: outside OUTPUT_DIR so the YouTube
+# uploader (which globs OUTPUT_DIR) never sees it. A screen grab you didn't name
+# is a scratch/local capture, not something to post — you must give a title to
+# put it in the upload queue.
+LOCAL_DIR="$BASE_DIR/local"            # final mp4, kept but NOT queued for upload
 
 # VAAPI render node for Intel hardware H.264 encoding. Override or set HWENC=0
 # to fall back to software x264 (more CPU, but no GPU needed).
@@ -75,6 +81,11 @@ VAAPI_QP="${VAAPI_QP:-20}"
 # Monitor to capture (wf-recorder -o). Empty = auto-detect the focused output
 # via hyprctl. Override with MONITOR=DP-1 etc.
 MONITOR="${MONITOR:-}"
+
+# Constant framerate for the recording. wf-recorder otherwise records at the
+# monitor's refresh rate (60 on eDP-1); 30 keeps files smaller for screen
+# content where 60fps buys nothing. Override with FPS=60 etc.
+FPS="${FPS:-30}"
 
 # Mic source. Empty = wf-recorder's default audio device (-a with no value).
 # Override with the PipeWire/Pulse source name (wpctl status / pw-cli ls Node).
@@ -94,10 +105,12 @@ SYSTEM_AUDIO="${SYSTEM_AUDIO:-}"
 # The ONLY audio processing is a single denoise filter on the voice to knock down
 # steady mic hiss / white noise — afftdn (FFT denoiser), kept gentle so the voice
 # itself is untouched. No EQ, highpass, compression or loudness normalization;
-# the system audio (music) is used exactly as captured. Raise nf (noise floor,
-# e.g. -20) for more reduction, lower it (e.g. -40) for less, or set
-# VOICE_DENOISE= empty to disable.
-VOICE_DENOISE="${VOICE_DENOISE:-afftdn=nr=12:nf=-25}"
+# the system audio (music) is used exactly as captured. nf=-25 was too close to
+# 0 (too high a noise floor) and chewed the quiet consonants at the start/end
+# of words; -40 sits much closer to ffmpeg's own default (-50) and leaves word
+# onsets/offsets alone. Raise nf (e.g. -20) for more reduction, lower it (e.g.
+# -50) for less, or set VOICE_DENOISE= empty to disable.
+VOICE_DENOISE="${VOICE_DENOISE:-afftdn=nr=12:nf=-40,volume=1.1}"
 
 # ---------------------------------------------------------------------------
 # Ensure wf-recorder + ffmpeg are available; re-exec inside nix's copies if not
@@ -122,7 +135,7 @@ if [[ "$_need_nix" == "1" ]]; then
     fi
 fi
 
-mkdir -p "$OUTPUT_DIR" "$RAW_DIR"
+mkdir -p "$OUTPUT_DIR" "$RAW_DIR" "$LOCAL_DIR"
 
 # ---------------------------------------------------------------------------
 # Pick the monitor to record. wf-recorder needs an output name; default to the
@@ -202,7 +215,7 @@ if [[ "$HWENC" == "1" && -e "$VAAPI_DEVICE" ]]; then
     fi
 fi
 
-rec_cmd=(wf-recorder -f "$raw")
+rec_cmd=(wf-recorder -f "$raw" -r "$FPS")
 [[ -n "$MONITOR" ]] && rec_cmd+=(-o "$MONITOR")
 if [[ "$use_vaapi" == "1" ]]; then
     # profile=high: the driver's default is Constrained Baseline, the weakest
@@ -246,7 +259,7 @@ if [[ "$SYSTEM" == "1" ]]; then
 fi
 
 echo "================================================================"
-echo " Recording monitor : ${MONITOR:-<wf-recorder default>}"
+echo " Recording monitor : ${MONITOR:-<wf-recorder default>} @ ${FPS}fps"
 echo " Mic source        : ${MIC:-<default>}"
 echo " System audio      : $([[ "$capture_system" == "1" ]] && echo "${SYSTEM_AUDIO:-default sink monitor} (mixed ${SYS_GAIN_DB} dB under voice)" || echo "off")"
 echo " Encoder           : $([[ "$use_vaapi" == "1" ]] && echo "VAAPI h264 ($VAAPI_DEVICE, qp $VAAPI_QP)" || echo "software x264 (crf 20)")"
@@ -422,10 +435,32 @@ else
     run_ffmpeg -y -i "$raw" -map 0:v:0 -c:v copy "$tmp_out"
 fi
 
-mv -f "$tmp_out" "$final"
+# ---------------------------------------------------------------------------
+# Queue for YouTube, or keep local. Same queue record_lessons.sh uses: the
+# uploader globs OUTPUT_DIR and posts one mp4 a day. But a screen grab you
+# didn't title is a scratch/local capture, not something to publish — so a
+# title is REQUIRED to queue it:
+#   title given → mp4 lands in OUTPUT_DIR with a "<name>.title.txt" sidecar
+#                 (title_for() reads it), and navylily-youtube.timer posts it
+#                 PRIVATE on its schedule (1/day, cap/cooldown/lock safety).
+#   blank       → mp4 lands in LOCAL_DIR instead, kept but NEVER queued/posted.
+# This script never uploads anything itself, same as record_lessons.sh.
+# ---------------------------------------------------------------------------
 echo ""
-echo "Done. Upload this to YouTube:"
-echo "  $final"
+read -r -p "YouTube title (blank = keep local, do NOT post): " yt_title
+if [[ -n "$yt_title" ]]; then
+    mv -f "$tmp_out" "$final"
+    printf '%s' "$yt_title" > "${final%.mp4}.title.txt"
+    echo ""
+    echo "Queued for YouTube — auto-posts PRIVATE, 1/day, public ~24h after upload:"
+    echo "  $final"
+else
+    local_final="$LOCAL_DIR/${name}.mp4"
+    mv -f "$tmp_out" "$local_final"
+    echo ""
+    echo "Kept local (NOT queued for upload):"
+    echo "  $local_final"
+fi
 echo "Raws kept at:"
 echo "  $raw"
 [[ -s "$sysraw" ]] && echo "  $sysraw"

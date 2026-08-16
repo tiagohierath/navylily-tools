@@ -73,29 +73,25 @@ FAST_MAX_SECONDS=3
 REST_MIN_SECONDS=10
 REST_MAX_SECONDS=20
 
-WATERMARK_TEXT="Aulas completas em navylily.tv"
+WATERMARK_TEXT="navylily.tv"
 WATERMARK_SECONDS=30
 
 # Serif font for the navylily.tv watermark. Defaults to the bundled
 # Garamond. Override with: FONTFILE=/path/to/font.ttf ./video
 FONTFILE="${FONTFILE:-}"
 
-# Outro card shown (static, full-frame) at the very end of EVERY video: a 4:3
-# black frame with centered white "Navylily.tv" in Garamond. Generated once with
-# ImageMagick if missing. Override the path with OUTRO_IMAGE=..., the text with
-# OUTRO_TEXT=..., or the on-screen time with OUTRO_SECONDS=...
-OUTRO_IMAGE="${OUTRO_IMAGE:-$BASE_DIR/outro.png}"
-OUTRO_TEXT="${OUTRO_TEXT:-Navylily.tv}"
-OUTRO_SECONDS="${OUTRO_SECONDS:-3}"
-
 # Single denoise filter on the narration to knock down steady mic hiss / white
 # noise — afftdn (FFT denoiser). It's deliberately gentle so the voice itself is
-# untouched; nothing else is processed. Raise nf (noise floor, e.g. -20) for more
-# reduction, lower it (e.g. -40) for less, or set VOICE_DENOISE= empty to disable.
-# NOTE: no colon in the expansion. ${VOICE_DENOISE-...} keeps a set-but-empty
-# value empty (denoise disabled, as documented above); ${VOICE_DENOISE:-...}
-# would silently re-enable the default when callers pass VOICE_DENOISE=.
-VOICE_DENOISE="${VOICE_DENOISE-afftdn=nr=12:nf=-25}"
+# untouched; nothing else is processed. nf=-25 was too close to 0 (too high a
+# noise floor), which made afftdn treat the quiet consonants at the start/end
+# of words as noise and chew them off; -40 is much closer to ffmpeg's own
+# default (-50) and leaves word onsets/offsets alone. Raise nf (e.g. -20) for
+# more reduction, lower it (e.g. -50) for less, or set VOICE_DENOISE= empty to
+# disable. NOTE: no colon in the expansion. ${VOICE_DENOISE-...} keeps a
+# set-but-empty value empty (denoise disabled, as documented above);
+# ${VOICE_DENOISE:-...} would silently re-enable the default when callers pass
+# VOICE_DENOISE=.
+VOICE_DENOISE="${VOICE_DENOISE-afftdn=nr=12:nf=-40,volume=1.1}"
 
 # ---------------------------------------------------------------------------
 # Make sure ffmpeg/ffprobe are available. Auto-wrap with nix's ffmpeg if not.
@@ -148,32 +144,6 @@ if [[ -z "$FONTFILE" ]]; then
     echo "WARNING: no font found for the watermark. Drop a .ttf in $FONTS_DIR" >&2
     echo "or set FONTFILE=/path/to/font.ttf. Continuing without watermark text." >&2
 fi
-
-# ---------------------------------------------------------------------------
-# Ensure the outro card exists. It's a 4:3 black frame with centered white text
-# in the same Garamond as the watermark. Generated once with ImageMagick (falls
-# back to nix if magick isn't on PATH); reused on every later run.
-# ---------------------------------------------------------------------------
-ensure_outro() {
-    [[ -f "$OUTRO_IMAGE" ]] && return 0
-    local mk=()
-    if command -v magick >/dev/null 2>&1; then
-        mk=(magick)
-    elif command -v convert >/dev/null 2>&1; then
-        mk=(convert)
-    elif command -v nix >/dev/null 2>&1; then
-        mk=(env -u LD_LIBRARY_PATH nix run nixpkgs#imagemagick -- magick)
-    else
-        echo "WARNING: $OUTRO_IMAGE missing and ImageMagick/nix unavailable to" >&2
-        echo "generate it. Videos will render WITHOUT the outro card." >&2
-        return 1
-    fi
-    echo "Generating outro card -> $OUTRO_IMAGE"
-    "${mk[@]}" -size "${WIDTH}x${HEIGHT}" canvas:black \
-        ${FONTFILE:+-font "$FONTFILE"} -fill white -pointsize 130 -gravity center \
-        -annotate +0+0 "$OUTRO_TEXT" "$OUTRO_IMAGE"
-}
-ensure_outro || true
 
 # ---------------------------------------------------------------------------
 # Setup folders
@@ -356,12 +326,16 @@ for audio in "${audio_files[@]}"; do
     duration="$(get_audio_duration "$audio")"
     echo "  audio duration: ${duration}s"
 
+    # The narration audio IS the video's length, and the slideshow fills it
+    # completely.
+    slideshow_len="$duration"
+
     run_dir="$WORK_DIR/$name"
     mkdir -p "$run_dir"
     seq_file="$run_dir/seq.txt"
     dur_file="$run_dir/dur.txt"
 
-    build_sequence "$duration" "$seq_file" "$dur_file"
+    build_sequence "$slideshow_len" "$seq_file" "$dur_file"
 
     mapfile -t seq < "$seq_file"
     mapfile -t durs < "$dur_file"
@@ -380,35 +354,28 @@ for audio in "${audio_files[@]}"; do
         offset=$(awk -v o="$offset" -v d="$dur" 'BEGIN{printf "%.4f", o+d}')
     done
 
-    # Outro card: append a static OUTRO_SECONDS clip (no watermark — pass an
-    # offset >= WATERMARK_SECONDS) so EVERY video ends on the Navylily.tv frame.
-    # total_video is the exact final length (slideshow + outro) we pad audio to.
-    total_video="$offset"
-    if [[ -f "$OUTRO_IMAGE" ]]; then
-        outro_clip="$run_dir/clip_outro.mp4"
-        echo "  [outro] $(basename "$OUTRO_IMAGE") for ${OUTRO_SECONDS}s"
-        make_image_clip "$OUTRO_IMAGE" "$OUTRO_SECONDS" "$WATERMARK_SECONDS" "$outro_clip"
-        echo "file '$outro_clip'" >> "$concat_list"
-        total_video=$(awk -v o="$offset" -v e="$OUTRO_SECONDS" 'BEGIN{printf "%.4f", o+e}')
-    fi
-
-    # Prepare the narration audio (no processing — used at its original level,
-    # just transcoded to a uniform wav for the mux).
+    # Prepare the narration audio (just transcoded to a uniform wav for muxing).
     audio_wav="$run_dir/audio.wav"
     prepare_audio "$audio" "$audio_wav"
 
-    # Mux: the clips are already final-quality H.264 with the watermark baked in,
-    # so the VIDEO IS COPIED (never re-encoded) and only the audio is encoded.
-    # Each frame is therefore encoded exactly once — the main speed win.
-    #
-    # apad + -t total_video pads the speech with trailing silence so the audio
-    # spans the full timeline: the outro card (and any slideshow overshoot past
-    # the speech) plays over silence instead of being cut by -shortest.
-    echo "  muxing (video copied, audio encoded)..."
+    # The slideshow clips are already final-quality H.264 (watermark baked in),
+    # so just concat them video-only (no audio yet).
+    slides_out="$run_dir/slides.mp4"
+    ffmpeg -y -f concat -safe 0 -i "$concat_list" \
+        -c:v copy -an \
+        "$slides_out" >/dev/null 2>&1
+
+    # The slideshow is the complete video track.
+    video_out="$slides_out"
+
+    # Mux the FULL narration (its whole duration, padded with trailing silence
+    # in case of float rounding) onto the joined video track as the sole audio
+    # source — the video ends exactly when the audio ends, nothing appended.
+    echo "  muxing full narration onto video (video copied, audio encoded)..."
     tmp_out="$run_dir/final.mp4"
-    ffmpeg -y -f concat -safe 0 -i "$concat_list" -i "$audio_wav" \
+    ffmpeg -y -i "$video_out" -i "$audio_wav" \
         -map 0:v:0 -map 1:a:0 \
-        -af apad -t "$total_video" \
+        -af apad -t "$duration" \
         -c:v copy -c:a aac -b:a 320k \
         -movflags +faststart \
         "$tmp_out" >/dev/null 2>&1

@@ -1,28 +1,40 @@
 # youtube_upload.sh
 
-Uploads exactly one video per run from `videos/output/` to YouTube, always private. Its persistent cadence can be daily, weekly, or monthly. Record as many as you like; they queue in `videos/output/` oldest first.
+Uploads exactly one video per run from `videos/output/` to a pinned YouTube
+channel. Queue order is persisted, so later filename/mtime changes cannot reorder it.
 
-Every upload is scheduled to go public automatically 1 day later (`YT_PUBLISH_AFTER_DAYS`, `0` disables). That window is your time to set the thumbnail in YouTube Studio.
+Every video uploads privately at 09:00 São Paulo and is scheduled to go public
+at 18:00 the same day. That window is your time to set the thumbnail in YouTube
+Studio. A run with less than two hours remaining safely waits until the next morning.
 
-Titles: if `record_lessons.sh` left a `<video>.title.txt` next to the mp4, that exact title is used. Otherwise it gets a random working title you rename later.
+Titles are required from a `<video>.title.txt` sidecar. Missing titles block the
+upload instead of publishing under an accidental random title.
 
 ## The three guards
 
 1. Cadence state: if today's or this month's cap already posted, the run exits.
-2. One video per run: it picks the oldest not-yet-uploaded video, nothing else.
+2. One video per run: it picks the first durable queued item, nothing else.
 3. A lock file stops two runs from overlapping.
 
-On top of that, every uploaded file is remembered by content hash, so the same video can never post twice, even renamed.
+State writes and staged upload bytes are fsynced. OAuth is pinned to one channel,
+and the 18:15 verifier blocks advancement and alerts if a due video is not public.
+A video that no longer exists at all is the one exception: it can never become
+public, so it is recorded as `missing` and skipped instead of blocking forever.
+
+On top of that, every uploaded byte sequence is remembered by SHA-256, so an
+identical video cannot post twice even if renamed. An uncertain API result
+stops for reconciliation instead of retrying blindly.
 
 ## Commands
 
 ```bash
-./youtube_upload.sh --authorize   # one-time Google login (opens a browser)
+./youtube_upload.sh --authorize   # Google login + pin/verify channel
 ./youtube_upload.sh --status      # last upload, cooldown, count
-./youtube_upload.sh --cadence daily    # every day at 18:00 São Paulo
-./youtube_upload.sh --cadence weekly   # Sundays at 18:00 São Paulo
-./youtube_upload.sh --cadence monthly  # 1st of the month at 18:00 São Paulo
+./youtube_upload.sh --cadence daily    # every day
+./youtube_upload.sh --cadence weekly   # Sundays
+./youtube_upload.sh --cadence monthly  # 1st of the month
 ./youtube_upload.sh --dry-run     # show what it WOULD do, upload nothing
+./youtube_upload.sh --verify-publications  # verify due videos; never upload
 ./youtube_upload.sh               # upload one video if allowed
 ```
 
@@ -50,28 +62,46 @@ title sidecar. The selected cadence above applies normally. Use
    ```
 
 Secrets and state live in `~/.local/state/navylily-youtube/`, never in the repo.
+After this hardening upgrade, run `--authorize` once again: the uploader now
+needs read-only access to verify and pin the exact destination channel.
 
 ## Useful settings (env vars)
 
 ```bash
-YT_PUBLISH_AFTER_DAYS=1    # days until a video goes public (0 = stays private)
+YT_PUBLIC_HOUR=18          # local hour when the private upload becomes public
+YT_MIN_SCHEDULE_LEAD_HOURS=2
+YT_REQUIRE_TITLE_SIDECAR=true
+YT_MADE_FOR_KIDS=false
+YT_CONTAINS_SYNTHETIC_MEDIA=false
 YT_MIN_HOURS_BETWEEN=...   # override the daily cooldown, if needed
 YT_OUTPUT_DIR=...          # look for videos somewhere else
+# Optional remote failure alert (Slack/Discord-compatible webhook):
+YT_ALERT_WEBHOOK_URL=...
 ```
 
-The timer runs at 18:00 São Paulo time. Switch the persistent cadence with
+Put timer settings in `~/.config/navylily-youtube.env`, then rerun
+`./install_timer.sh`. Failures are always written to `health.json` and the
+systemd journal; `notify-send` and the optional webhook are best-effort alerts.
+
+The private-upload timer runs at 09:00 São Paulo, publication is at 18:00, and
+the verification timer checks it at 18:15.
+Switch the persistent cadence with
 `--cadence daily`, `--cadence weekly`, or `--cadence monthly`. Weekly mode
 posts on Sundays; monthly mode posts on the first day. The hard same-day,
 weekly, and monthly guards prevent double-posting.
 
 ## State and resets
 
-`~/.local/state/navylily-youtube/state.json` holds the last upload time and the list of uploaded videos. To force a test upload today, set `last_upload_iso` to `null`. To let one specific video upload again, remove its entry from `uploaded`.
+`~/.local/state/navylily-youtube/state.json` holds upload history, the pinned
+channel, and durable queue order. `state.json.bak` preserves the prior valid
+generation. Do not hand-edit either file: malformed or inconsistent state
+fails closed specifically to prevent duplicates.
 
 Before an upload request, the script records a pending entry. This prevents a
 crash or lost network response from causing a duplicate post. If it reports a
 pending upload, check YouTube Studio: use `--resolve-pending VIDEO_ID` if the
-video exists, or `--discard-pending` only after confirming it does not.
+video exists. `--discard-pending` scans recent channel uploads and requires an
+interactive exact-filename confirmation; use it only after checking Studio.
 
 ## Common messages
 
@@ -80,6 +110,10 @@ video exists, or `--discard-pending` only after confirming it does not.
 - "A previous upload is pending reconciliation": check YouTube Studio before
   choosing `--resolve-pending` or `--discard-pending`; this avoids duplicates
   after an uncertain network failure.
+- "MISSING from YouTube": the video no longer exists (deleted in Studio, or
+  removed by YouTube). It can never become public, so it is recorded as
+  `missing`, alerted once, and never checked again. Uploads continue normally.
+  `--verify-publications` exits 5 on the run that discovers it.
 - "Cooldown active": guard 1, hours not elapsed yet.
 - "No new videos, nothing to do": the queue is empty, also normal.
 - "Another upload run is already in progress": guard 3, two runs overlapped.

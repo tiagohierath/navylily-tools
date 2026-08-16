@@ -18,7 +18,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # libs. Listing the packages as separate `nix shell` installables only puts
 # their binaries on PATH — the interpreter can't import them, which fails with
 # "No module named 'google'".
-PY_EXPR='let pkgs = import (builtins.getFlake "nixpkgs") {}; in pkgs.python3.withPackages (ps: with ps; [ google-api-python-client google-auth-oauthlib google-auth-httplib2 ])'
+# Pin the exact nixpkgs revision used by the host configuration. A registry
+# update can no longer silently change the uploader's Python dependencies.
+NIXPKGS_REV='8f0500b9660505dc3cb647775fe9a978a74b5283'
+PY_EXPR="let pkgs = import (builtins.getFlake \"github:NixOS/nixpkgs/$NIXPKGS_REV\") {}; in pkgs.python3.withPackages (ps: with ps; [ google-api-python-client google-auth-oauthlib google-auth-httplib2 ])"
+
+# Read-only/local commands intentionally avoid Nix and all network-capable API
+# dependencies. This keeps diagnostics available even if the daemon is down.
+case "${1:-}" in
+    --dry-run|--status|--cadence|-h|--help)
+        exec python3 "$HERE/youtube_upload.py" "$@"
+        ;;
+esac
 
 # A leaked LD_LIBRARY_PATH (host libs built against a newer glibc) breaks
 # nix-provided binaries with GLIBC_ABI_DT_X86_64_PLT errors — strip it.

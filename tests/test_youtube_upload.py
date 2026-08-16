@@ -132,9 +132,10 @@ class UploaderSafetyTests(unittest.TestCase):
         return path
 
     def service(self, privacy="private"):
-        publish_at = self.fixed_now.replace(hour=18).astimezone(
-            dt.timezone.utc).isoformat()
-        return Service(self.channel_id, publish_at, privacy)
+        # Echo the schedule the uploader actually asks for, so these fakes track
+        # the configured publication delay instead of hardcoding one.
+        return Service(
+            self.channel_id, yt.scheduled_publish_at().isoformat(), privacy)
 
     def run_main(self, *args):
         # main() holds its flock until process exit, so successive in-process
@@ -330,6 +331,120 @@ class UploaderSafetyTests(unittest.TestCase):
     def test_actions_are_mutually_exclusive(self):
         with self.assertRaises(SystemExit):
             self.run_main("--dry-run", "--cadence", "weekly")
+
+    def test_lost_state_next_to_a_backup_refuses_to_start_over(self):
+        # Losing state.json while state.json.bak survives is not a fresh
+        # install: starting empty would repost every video already public.
+        self.make_video()
+        yt.save_state(dict(self.state))          # writes state.json.bak
+        self.assertTrue(yt.STATE_BACKUP_FILE.exists())
+        yt.STATE_FILE.unlink()
+        with self.assertRaises(RuntimeError) as caught:
+            yt.load_state()
+        self.assertIn("repost", str(caught.exception))
+        with mock.patch.object(yt, "get_service") as get_service, \
+             mock.patch.object(yt, "upload") as upload:
+            with self.assertRaises(RuntimeError):
+                self.run_main()
+            upload.assert_not_called()
+            get_service.assert_not_called()
+
+    def test_fresh_install_with_no_state_at_all_still_starts(self):
+        yt.STATE_FILE.unlink()
+        self.assertFalse(yt.STATE_BACKUP_FILE.exists())
+        state = yt.load_state()
+        self.assertEqual(state["uploaded"], [])
+
+    def test_late_night_catch_up_does_not_block_the_next_slot(self):
+        # A machine that was off at 18:00 catches up at 23:10. The next day's
+        # 18:00 run is only 18.8h later, so a cooldown of 20h silently skipped
+        # a day. The cooldown must stay under that gap.
+        self.make_video()
+        late = dt.datetime(2026, 8, 10, 23, 10,
+                           tzinfo=dt.timezone(dt.timedelta(hours=-3)))
+        self.write_state({
+            "last_upload_iso": late.isoformat(),
+            "uploaded": [],
+            "expected_channel_id": self.channel_id,
+        })
+        yt.now_local = lambda: late + dt.timedelta(hours=18, minutes=50)
+        self.assertEqual(yt.cooldown_remaining(yt.load_state()), 0.0)
+
+    def test_next_day_target_survives_calendar_and_dst_edges(self):
+        from zoneinfo import ZoneInfo
+        cases = [
+            # (zone, upload local time, expected local publication)
+            ("America/Sao_Paulo", (2026, 8, 31, 18, 0), (2026, 9, 1, 18, 0)),
+            ("America/Sao_Paulo", (2026, 12, 31, 18, 0), (2027, 1, 1, 18, 0)),
+            ("America/Sao_Paulo", (2028, 2, 28, 18, 0), (2028, 2, 29, 18, 0)),
+            # Clocks jump forward overnight: the target stays 18:00 local, so
+            # the UTC instant shifts by an hour instead of the wall clock.
+            ("America/New_York", (2026, 3, 7, 18, 0), (2026, 3, 8, 18, 0)),
+        ]
+        saved_tz = yt.UPLOAD_TZ
+        try:
+            for zone, upload, expect in cases:
+                yt.UPLOAD_TZ = zone
+                tz = ZoneInfo(zone)
+                yt.now_local = lambda tz=tz, upload=upload: dt.datetime(
+                    *upload, tzinfo=tz)
+                got = yt.scheduled_publish_at().astimezone(tz)
+                self.assertEqual(
+                    got, dt.datetime(*expect, tzinfo=tz),
+                    f"{zone} {upload} -> {got}")
+        finally:
+            yt.UPLOAD_TZ = saved_tz
+
+    def test_publication_is_scheduled_for_the_next_day(self):
+        self.make_video()
+        captured = {}
+
+        def fake_upload(_service, _staged, _title, publish_at):
+            captured["publish_at"] = publish_at
+            return "abcdefghijk"
+
+        with mock.patch.object(yt, "get_service", return_value=self.service()), \
+             mock.patch.object(yt, "upload", side_effect=fake_upload):
+            self.assertEqual(self.run_main(), 0)
+
+        expected = (self.fixed_now + dt.timedelta(days=1)).replace(
+            hour=yt.PUBLIC_HOUR, minute=0, second=0, microsecond=0)
+        self.assertEqual(captured["publish_at"], expected)
+        self.assertEqual(
+            yt.load_state()["uploaded"][0]["expected_public_at"],
+            expected.astimezone(dt.timezone.utc).isoformat())
+
+    def test_video_still_flipping_within_grace_does_not_block(self):
+        # The upload run starts at the publication hour, so yesterday's video is
+        # due but YouTube may take a few minutes to flip it. That must not abort
+        # the run the way a genuinely unpublished video does.
+        first = self.make_video("first.mp4", b"first")
+        key = yt.file_key(first)
+        first.unlink()
+        first.with_suffix(".title.txt").unlink()
+        self.make_video("second.mp4", b"second")
+        just_due = self.fixed_now - dt.timedelta(minutes=5)
+        self.write_state({
+            "last_upload_iso": (self.fixed_now - dt.timedelta(days=1)).isoformat(),
+            "uploaded": [{
+                "key": key, "name": "first.mp4", "video_id": "abcdefghijk",
+                "uploaded_iso": (self.fixed_now - dt.timedelta(days=1)).isoformat(),
+                "expected_public_at": just_due.astimezone(
+                    dt.timezone.utc).isoformat(),
+                "publication_status": "schedule_verified",
+            }],
+            "expected_channel_id": self.channel_id,
+        })
+        service = self.service(privacy="private")
+        with mock.patch.object(yt, "get_service", return_value=service), \
+             mock.patch.object(yt, "upload", return_value="bcdefghijkl") as upload:
+            self.assertEqual(self.run_main(), 0)
+            upload.assert_called_once()
+
+        state = yt.load_state()
+        # Still not verified, so the next run past the grace re-checks it.
+        self.assertEqual(state["uploaded"][0]["publication_status"],
+                         "schedule_verified")
 
 
 if __name__ == "__main__":

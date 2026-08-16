@@ -15,9 +15,9 @@
 #   5. Processes the voice (light by default: highpass, lowpass, loudnorm) and
 #      renders the video in the background, serialized by a lock.
 #   6. Writes the article title next to the mp4; youtube_upload.py posts it
-#      under that exact wiki title, PRIVATE, on the selected daily, weekly, or
-#      monthly cadence at 18:00, and
-#      YouTube flips it public automatically after YT_PUBLISH_AFTER_DAYS (1).
+#      under that exact wiki title, PRIVATE, at 18:00 on the selected daily,
+#      weekly, or monthly cadence, and YouTube flips it public at 18:00 the
+#      next day (YT_PUBLISH_DELAY_DAYS, default 1).
 #
 # This script never uploads anything itself; the scheduled timer does the posting.
 #

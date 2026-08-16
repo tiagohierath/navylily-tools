@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # install_timer.sh, install a *user* systemd timer that runs the uploader at
-# 09:00 São Paulo, every day. Videos remain private until 18:00.
+# 18:00 São Paulo, every day. Each video stays private until 18:00 the NEXT day.
 # setting chooses daily, Sunday-only, or first-of-month posting.
 # It posts one private video if any are waiting. Designed to be fully hands-off.
 #
@@ -75,12 +75,13 @@ EOF
 # Use the named zone so future Brazilian timezone-law changes remain correct.
 cat > "$TIMER" <<EOF
 [Unit]
-Description=Navylily YouTube private upload, 09:00 São Paulo
+Description=Navylily YouTube private upload, 18:00 São Paulo
 
 [Timer]
 # The uploader enforces its selected daily/weekly/monthly cadence itself.
-OnCalendar=*-*-* 09:00:00 America/Sao_Paulo
-# Run after a missed slot only if today's safe pre-publication window remains.
+OnCalendar=*-*-* 18:00:00 America/Sao_Paulo
+# The machine is often off at the scheduled hour, so catch up on the next boot.
+# Publication is a full day out, so a late run still has its safety margin.
 Persistent=true
 
 [Install]
@@ -104,10 +105,12 @@ EOF
 
 cat > "$VERIFY_TIMER" <<EOF
 [Unit]
-Description=Verify Navylily YouTube publication at 18:15 São Paulo
+Description=Verify Navylily YouTube publication at 18:45 São Paulo
 
 [Timer]
-OnCalendar=*-*-* 18:15:00 America/Sao_Paulo
+# After the 18:00 publication plus the uploader's grace period, so a video
+# YouTube is still flipping is not read as a failed publication.
+OnCalendar=*-*-* 18:45:00 America/Sao_Paulo
 Persistent=true
 
 [Install]

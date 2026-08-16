@@ -3,9 +3,11 @@
 Uploads exactly one video per run from `videos/output/` to a pinned YouTube
 channel. Queue order is persisted, so later filename/mtime changes cannot reorder it.
 
-Every video uploads privately at 09:00 São Paulo and is scheduled to go public
-at 18:00 the same day. That window is your time to set the thumbnail in YouTube
-Studio. A run with less than two hours remaining safely waits until the next morning.
+Every video uploads privately at 18:00 São Paulo and is scheduled to go public
+at 18:00 the next day. That full day is your time to set the thumbnail in YouTube
+Studio. The evening slot exists because the machine is usually off in the
+morning; a missed run catches up on the next boot and still schedules its
+publication a day out.
 
 Titles are required from a `<video>.title.txt` sidecar. Missing titles block the
 upload instead of publishing under an accidental random title.
@@ -17,7 +19,7 @@ upload instead of publishing under an accidental random title.
 3. A lock file stops two runs from overlapping.
 
 State writes and staged upload bytes are fsynced. OAuth is pinned to one channel,
-and the 18:15 verifier blocks advancement and alerts if a due video is not public.
+and the 18:45 verifier blocks advancement and alerts if a due video is not public.
 A video that no longer exists at all is the one exception: it can never become
 public, so it is recorded as `missing` and skipped instead of blocking forever.
 
@@ -69,11 +71,13 @@ needs read-only access to verify and pin the exact destination channel.
 
 ```bash
 YT_PUBLIC_HOUR=18          # local hour when the private upload becomes public
+YT_PUBLISH_DELAY_DAYS=1    # days private before that hour arrives (0 = same day)
+YT_PUBLICATION_GRACE_MINUTES=30  # slack before a due video counts as unpublished
 YT_MIN_SCHEDULE_LEAD_HOURS=2
 YT_REQUIRE_TITLE_SIDECAR=true
 YT_MADE_FOR_KIDS=false
 YT_CONTAINS_SYNTHETIC_MEDIA=false
-YT_MIN_HOURS_BETWEEN=...   # override the daily cooldown, if needed
+YT_MIN_HOURS_BETWEEN=...   # override the daily cooldown (default 12h)
 YT_OUTPUT_DIR=...          # look for videos somewhere else
 # Optional remote failure alert (Slack/Discord-compatible webhook):
 YT_ALERT_WEBHOOK_URL=...
@@ -83,8 +87,8 @@ Put timer settings in `~/.config/navylily-youtube.env`, then rerun
 `./install_timer.sh`. Failures are always written to `health.json` and the
 systemd journal; `notify-send` and the optional webhook are best-effort alerts.
 
-The private-upload timer runs at 09:00 São Paulo, publication is at 18:00, and
-the verification timer checks it at 18:15.
+The private-upload timer runs at 18:00 São Paulo, publication is at 18:00 the
+next day, and the verification timer checks it at 18:45.
 Switch the persistent cadence with
 `--cadence daily`, `--cadence weekly`, or `--cadence monthly`. Weekly mode
 posts on Sundays; monthly mode posts on the first day. The hard same-day,

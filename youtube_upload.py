@@ -3,8 +3,8 @@
 youtube_upload.py
 
 Uploads exactly ONE video per run from the durable queue to the pinned YouTube
-channel. It uploads privately in the morning and schedules publication for
-18:00 America/Sao_Paulo the same day.
+channel. It uploads privately at 18:00 America/Sao_Paulo and schedules
+publication for 18:00 the next day, so every video sits private for a full day.
 
 It is designed to fail closed under ambiguous state or API results, with
 independent safety mechanisms:
@@ -101,14 +101,20 @@ def cadence(state: dict) -> str:
 
 
 def min_hours_between(state: dict) -> float:
-    """Avoid a daily fence-post failure when one run finishes slightly late."""
+    """Stop two posts straddling midnight, without skipping a scheduled day.
+
+    The same-day guard already allows only one upload per local date, so this
+    floor exists for the 23:50-then-00:10 case alone. It must stay well under
+    the gap between a late catch-up run and the next 18:00 slot: at 20h (the
+    value tuned for the old 09:00 timer) a boot after 22:00 silently skipped
+    the following day."""
     override = os.environ.get("YT_MIN_HOURS_BETWEEN")
     if override is not None:
         value = float(override)
         if not math.isfinite(value) or value < 0:
             raise ValueError("YT_MIN_HOURS_BETWEEN must be finite and non-negative")
         return value
-    return 20.0 if cadence(state) == "daily" else 0.0
+    return 12.0 if cadence(state) == "daily" else 0.0
 
 
 def cadence_schedule_block(state: dict) -> str | None:
@@ -122,11 +128,19 @@ def cadence_schedule_block(state: dict) -> str | None:
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 
-# Scheduled auto-publish. The morning timer uploads each video PRIVATE, and
-# YouTube flips it to PUBLIC at this local hour on the same day.
+# Scheduled auto-publish. The evening timer uploads each video PRIVATE, and
+# YouTube flips it to PUBLIC at this local hour, PUBLISH_DELAY_DAYS later.
 PUBLIC_HOUR = int(os.environ.get("YT_PUBLIC_HOUR", "18"))
 if not 0 <= PUBLIC_HOUR <= 23:
     raise ValueError("YT_PUBLIC_HOUR must be an integer from 0 through 23")
+
+# Whole days between the private upload and its publication. 1 means an 18:00
+# upload goes public at 18:00 the next day, a full day of private window to set
+# the real title and thumbnail. 0 restores same-day publication.
+PUBLISH_DELAY_DAYS = int(os.environ.get("YT_PUBLISH_DELAY_DAYS", "1"))
+if not 0 <= PUBLISH_DELAY_DAYS <= 30:
+    raise ValueError(
+        "YT_PUBLISH_DELAY_DAYS must be an integer from 0 through 30")
 
 MIN_SCHEDULE_LEAD_HOURS = float(os.environ.get(
     "YT_MIN_SCHEDULE_LEAD_HOURS", "2"))
@@ -164,21 +178,30 @@ CONTAINS_SYNTHETIC_MEDIA = env_bool(
 REQUIRE_TITLE_SIDECAR = env_bool("YT_REQUIRE_TITLE_SIDECAR", True)
 
 
-def publish_at_today() -> dt.datetime:
-    """Today's configured publication time, returned as an aware UTC value."""
-    local = now_local().replace(
+def scheduled_publish_at() -> dt.datetime:
+    """This run's publication time, PUBLISH_DELAY_DAYS out, as aware UTC.
+
+    Days are added to the local wall clock before the hour is attached, so a
+    timezone change moves the target to the same 18:00 rather than skewing it."""
+    local = (now_local() + dt.timedelta(days=PUBLISH_DELAY_DAYS)).replace(
         hour=PUBLIC_HOUR, minute=0, second=0, microsecond=0)
     return local.astimezone(dt.timezone.utc)
+
+
+def schedule_label(publish_at: dt.datetime) -> str:
+    local = publish_at.astimezone(now_local().tzinfo)
+    return f"private, auto-public {local:%a %Y-%m-%d} at {PUBLIC_HOUR:02d}:00"
 
 
 def ensure_schedule_lead(publish_at: dt.datetime) -> None:
     remaining = publish_at - now_local().astimezone(dt.timezone.utc)
     minimum = dt.timedelta(hours=MIN_SCHEDULE_LEAD_HOURS)
     if remaining < minimum:
+        local = publish_at.astimezone(now_local().tzinfo)
         raise PreUploadError(
-            f"Less than {MIN_SCHEDULE_LEAD_HOURS:g}h remains before today's "
-            f"{PUBLIC_HOUR:02d}:00 publication. Waiting for tomorrow prevents "
-            "an immediate or partially processed public video.")
+            f"Less than {MIN_SCHEDULE_LEAD_HOURS:g}h remains before the "
+            f"{local:%Y-%m-%d %H:%M} publication. Waiting for the next run "
+            "prevents an immediate or partially processed public video.")
 
 # Pool of neutral, random working titles. The real title is set manually later.
 TITLE_WORDS_A = [
@@ -331,6 +354,16 @@ def validate_state(state: object) -> dict:
 
 def load_state() -> dict:
     if not STATE_FILE.exists():
+        if STATE_BACKUP_FILE.exists():
+            # A real first install has neither file. A missing state file next
+            # to a backup means the history was lost, and starting empty would
+            # repost every video already public on the channel, one per day.
+            raise RuntimeError(
+                f"Upload state {STATE_FILE} is missing but its backup "
+                f"{STATE_BACKUP_FILE} is still here, so this is not a fresh "
+                "install. Refusing to upload because an empty history would "
+                f"repost the whole channel. Restore it with:\n"
+                f"  cp {STATE_BACKUP_FILE} {STATE_FILE}")
         return {"last_upload_iso": None, "uploaded": []}
     try:
         state = json.loads(STATE_FILE.read_text())
@@ -747,8 +780,9 @@ def migrate_legacy_publication_state(state: dict) -> None:
         assert uploaded is not None
         local_uploaded = uploaded.astimezone(now.tzinfo)
         if local_uploaded.date() == now.date() and entry.get("video_id"):
-            expected_local = local_uploaded.replace(
-                hour=PUBLIC_HOUR, minute=0, second=0, microsecond=0)
+            expected_local = (
+                local_uploaded + dt.timedelta(days=PUBLISH_DELAY_DAYS)).replace(
+                    hour=PUBLIC_HOUR, minute=0, second=0, microsecond=0)
             entry["expected_public_at"] = expected_local.astimezone(
                 dt.timezone.utc).isoformat()
             entry["publication_status"] = "scheduled"
@@ -838,6 +872,16 @@ def verify_uploaded_schedule(
 # Publication statuses that can never change again, so they are never re-checked.
 TERMINAL_PUBLICATION_STATUSES = {"public_verified", "missing"}
 
+# YouTube flips a scheduled video a few minutes after publishAt, and the upload
+# run itself starts at the publication hour. Without this grace period, an
+# on-time run would check yesterday's video seconds before YouTube publishes it,
+# read it as still private, and abort the whole upload.
+PUBLICATION_GRACE_MINUTES = float(os.environ.get(
+    "YT_PUBLICATION_GRACE_MINUTES", "30"))
+if not math.isfinite(PUBLICATION_GRACE_MINUTES) or PUBLICATION_GRACE_MINUTES < 0:
+    raise ValueError(
+        "YT_PUBLICATION_GRACE_MINUTES must be finite and non-negative")
+
 
 def verify_due_publications(
         service, state: dict, expected_channel_id: str) -> list[dict]:
@@ -853,7 +897,9 @@ def verify_due_publications(
         expected = parse_state_time(
             expected_raw, f"uploaded[{entry.get('name')}].expected_public_at")
         assert expected is not None
-        if expected.astimezone(dt.timezone.utc) > now_utc:
+        due_at = expected.astimezone(dt.timezone.utc) + dt.timedelta(
+            minutes=PUBLICATION_GRACE_MINUTES)
+        if due_at > now_utc:
             continue
         video_id = entry.get("video_id")
         if not isinstance(video_id, str) or not VIDEO_ID_RE.fullmatch(video_id):
@@ -937,11 +983,13 @@ def upload(
         "selfDeclaredMadeForKids": MADE_FOR_KIDS,
         "containsSyntheticMedia": CONTAINS_SYNTHETIC_MEDIA,
     }
-    # main() refuses to start after this cutoff, so publishAt stays in the
-    # future even when a persistent timer wakes late.
+    # The target is a whole day out, and ensure_schedule_lead re-checks it right
+    # before this call, so publishAt stays in the future even when a persistent
+    # timer wakes late.
     body_status["publishAt"] = publish_at.isoformat()
     print(f"  scheduled public: {publish_at.isoformat()} "
-          f"({PUBLIC_HOUR:02d}:00 {UPLOAD_TZ})")
+          f"({PUBLIC_HOUR:02d}:00 {UPLOAD_TZ}, "
+          f"+{PUBLISH_DELAY_DAYS}d)")
 
     body = {
         "snippet": {
@@ -1042,6 +1090,8 @@ def main() -> int:
             "queued_count": len(state.get("queue", [])),
             "pending_upload": pending_upload(state),
             "public_hour_local": PUBLIC_HOUR,
+            "publish_delay_days": PUBLISH_DELAY_DAYS,
+            "next_publish_at": scheduled_publish_at().isoformat(),
             "minimum_schedule_lead_hours": MIN_SCHEDULE_LEAD_HOURS,
             "expected_channel_id": state.get("expected_channel_id"),
             "health": health,
@@ -1073,8 +1123,9 @@ def main() -> int:
         if remaining > 0:
             print(f"Cooldown active: {remaining:.1f}h left.")
             return 0
+        publish_at = scheduled_publish_at()
         try:
-            ensure_schedule_lead(publish_at_today())
+            ensure_schedule_lead(publish_at)
         except PreUploadError as e:
             print(e)
             return 0
@@ -1084,8 +1135,7 @@ def main() -> int:
             return 0
         title = title_for(video)
         print(f"Selected: {video.name}")
-        print(f"Title:    {title}  (private, auto-public today at "
-              f"{PUBLIC_HOUR:02d}:00)")
+        print(f"Title:    {title}  ({schedule_label(publish_at)})")
         print("[dry-run] would upload the above; no API call; state NOT modified.")
         return 0
 
@@ -1215,7 +1265,7 @@ def main() -> int:
               "exiting.")
         return 0
 
-    publish_at = publish_at_today()
+    publish_at = scheduled_publish_at()
     try:
         ensure_schedule_lead(publish_at)
     except PreUploadError as e:
@@ -1239,7 +1289,7 @@ def main() -> int:
         return 3
 
     title = title_for(video)
-    sched = f"private, auto-public today at {PUBLIC_HOUR:02d}:00"
+    sched = schedule_label(publish_at)
     print(f"Selected: {video.name}")
     print(f"Title:    {title}  ({sched})")
 

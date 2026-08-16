@@ -2,19 +2,21 @@
 """
 queue_view.py — read-only view of the YouTube posting queue.
 
-Shows the videos waiting in videos/output/ (oldest first, the exact order
+Shows the videos waiting in videos/output/ (durable enqueue order, the exact order
 youtube_upload.py posts them), and projects when each will upload (private)
 and auto-flip PUBLIC, using the same selected cadence as the uploader: daily,
-weekly on Sundays, or monthly on the first day, all at 18:00 America/Sao_Paulo.
+weekly on Sundays, or monthly on the first day. Upload is 18:00 and publication
+is 18:00 the next day, America/Sao_Paulo.
 
 It NEVER uploads, writes, or touches state. Just reads. Run it anytime:
 
     nl-queue
 
 Config is read from the installed systemd service so this always matches
-reality; falls back to the current live values (daily cadence, 1-day public)
-if the unit can't be read. Override with YT_MIN_HOURS_BETWEEN /
-YT_PUBLISH_AFTER_DAYS / YT_OUTPUT_DIR / YT_STATE_DIR just like the uploader.
+reality; falls back to the current live values (daily cadence, upload 18:00,
+public 18:00 the next day) if the unit can't be read. Override with
+YT_MIN_HOURS_BETWEEN / YT_PUBLIC_HOUR / YT_PUBLISH_DELAY_DAYS / YT_UPLOAD_HOUR /
+YT_OUTPUT_DIR / YT_STATE_DIR just like the uploader.
 """
 from __future__ import annotations
 
@@ -25,6 +27,8 @@ import re
 import subprocess
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from youtube_upload import file_key, legacy_file_key, validate_state
 
 HOME = Path.home()
 TZ = ZoneInfo(os.environ.get("YT_TZ", "America/Sao_Paulo"))
@@ -48,6 +52,22 @@ def service_env(key: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
+def timer_upload_hour() -> float | None:
+    """Read the installed timer's own OnCalendar hour, so the projection can
+    never drift from the schedule that actually runs."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", "cat", "navylily-youtube.timer"],
+            capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    m = re.search(r"^OnCalendar=.*?(\d{1,2}):(\d{2})(?::\d{2})?", out, re.M)
+    if not m:
+        return None
+    hour = int(m.group(1))
+    return float(hour) if 0 <= hour <= 23 else None
+
+
 def cfg_float(env_key: str, live_default: float) -> float:
     for v in (os.environ.get(env_key), service_env(env_key)):
         if v:
@@ -60,22 +80,47 @@ def cfg_float(env_key: str, live_default: float) -> float:
 
 def main() -> int:
     now = dt.datetime.now(TZ)
-    pub_days = cfg_float("YT_PUBLISH_AFTER_DAYS", 1.0)  # live: auto-public +1 day
+    public_hour = int(cfg_float("YT_PUBLIC_HOUR", 18.0))
+    if not 0 <= public_hour <= 23:
+        raise ValueError("YT_PUBLIC_HOUR must be an integer from 0 through 23")
+    from_timer = timer_upload_hour()
+    upload_hour = int(cfg_float(
+        "YT_UPLOAD_HOUR", 18.0 if from_timer is None else from_timer))
+    if not 0 <= upload_hour <= 23:
+        raise ValueError("YT_UPLOAD_HOUR must be an integer from 0 through 23")
+    publish_delay_days = int(cfg_float("YT_PUBLISH_DELAY_DAYS", 1.0))
+    if not 0 <= publish_delay_days <= 30:
+        raise ValueError(
+            "YT_PUBLISH_DELAY_DAYS must be an integer from 0 through 30")
 
     try:
-        state = json.loads(STATE_FILE.read_text())
+        state = validate_state(json.loads(STATE_FILE.read_text()))
     except OSError:
         state = {"uploaded": [], "last_upload_iso": None}
     posting_cadence = state.get("cadence", os.environ.get("YT_CADENCE_DEFAULT", "daily"))
     if posting_cadence not in {"daily", "weekly", "monthly"}:
         posting_cadence = "daily"
-    done = {e.get("name") for e in state.get("uploaded", [])}
+    done = {e["key"] for e in state.get("uploaded", [])}
 
     vids = sorted(
         (p for p in OUTPUT_DIR.glob("*")
          if p.is_file() and p.suffix.lower() in VIDEO_EXTS),
-        key=lambda p: p.stat().st_mtime)
-    pending = [p for p in vids if p.name not in done]
+        key=lambda p: (p.stat().st_mtime_ns, p.name))
+    by_key: dict[str, Path] = {}
+    for path in vids:
+        by_key.setdefault(file_key(path), path)
+    pending = []
+    selected: set[str] = set()
+    for entry in state.get("queue", []):
+        path = by_key.get(entry["key"])
+        if (path is not None and entry["key"] not in done
+                and legacy_file_key(path) not in done):
+            pending.append(path)
+            selected.add(entry["key"])
+    pending.extend(
+        path for key, path in by_key.items()
+        if key not in done and legacy_file_key(path) not in done
+        and key not in selected)
 
     last_iso = state.get("last_upload_iso")
     last = dt.datetime.fromisoformat(last_iso) if last_iso else None
@@ -83,8 +128,8 @@ def main() -> int:
     print()
     print(f"  YouTube queue — {len(done)} posted, {len(pending)} waiting")
     print(f"  current cadence: {posting_cadence}")
-    print(f"  schedule: {posting_cadence} at 18:00 (SP), "
-          f"auto-public +{pub_days:g}d")
+    print(f"  schedule: {posting_cadence} upload at {upload_hour:02d}:00 (SP), "
+          f"PUBLIC at {public_hour:02d}:00 +{publish_delay_days}d")
     if last:
         print(f"  last upload: {last.astimezone(TZ):%a %d %b %H:%M}")
     print()
@@ -97,7 +142,7 @@ def main() -> int:
     def scheduled_fires(start: dt.datetime):
         d = start.date()
         while True:
-            candidate = dt.datetime.combine(d, dt.time(18), tzinfo=TZ)
+            candidate = dt.datetime.combine(d, dt.time(upload_hour), tzinfo=TZ)
             eligible = (
                 posting_cadence == "daily"
                 or (posting_cadence == "weekly" and d.weekday() == 6)
@@ -115,9 +160,11 @@ def main() -> int:
             fire = next(fires)
             if prev is None or fire.date() != prev.astimezone(TZ).date():
                 break
-        pub = fire + dt.timedelta(days=pub_days)
+        pub = (fire + dt.timedelta(days=publish_delay_days)).replace(
+            hour=public_hour)
         sc = p.with_suffix(".title.txt")
-        title = sc.read_text(encoding="utf-8").strip() if sc.exists() else "(random title)"
+        title = (sc.read_text(encoding="utf-8").strip()
+                 if sc.exists() else "(MISSING TITLE — UPLOAD BLOCKED)")
         rows.append((fire, pub, title))
         prev = fire
 

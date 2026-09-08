@@ -4,17 +4,15 @@ lessons.py, helper for record_lessons.sh.
 
 Knows how to enumerate the Navy Lily wiki articles, work out which ones have
 already been recorded, extract the exact article title, turn a title into a
-filesystem-safe slug, and render an article to a clean, readable HTML page you
-open in the browser while you narrate.
+filesystem-safe slug, and select the next lesson to record.
 
-It writes NOTHING permanent except the temp HTML page it renders; all the
-"has this been recorded?" state is derived from the files on disk (an audio wav
-in AUDIO_DIR or a finished mp4 in OUTPUT_DIR), so there is no state file to
-drift.
+It writes nothing. All the "has this been recorded?" state is derived from the
+files on disk (an audio wav in AUDIO_DIR or a finished mp4 in OUTPUT_DIR), so
+there is no state file to drift.
 
 Subcommands (paths come from env: WIKI_DIR, AUDIO_DIR, OUTPUT_DIR):
   next [search]   Pick a lesson and print a TAB-separated line:
-                      slug <TAB> title <TAB> md_path <TAB> html_path
+                      slug <TAB> title
                   With no search: a RANDOM not-yet-recorded lesson (so similar
                   articles aren't narrated back to back), minus any slugs in
                   $SKIP_SLUGS (space separated, the recorder's per-session skip
@@ -28,11 +26,9 @@ Subcommands (paths come from env: WIKI_DIR, AUDIO_DIR, OUTPUT_DIR):
 from __future__ import annotations
 
 import hashlib
-import html
 import os
 import re
 import sys
-import tempfile
 import unicodedata
 from pathlib import Path
 
@@ -98,94 +94,6 @@ def all_lessons() -> list[Lesson]:
     return lessons
 
 
-# ---------------------------------------------------------------------------
-# Minimal, forgiving Markdown -> HTML, tuned for reading one article aloud.
-# ---------------------------------------------------------------------------
-def inline(text: str) -> str:
-    text = html.escape(text)
-    # Images are useless while narrating; links read as their text only.
-    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
-    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
-    text = re.sub(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)", r"<em>\1</em>", text)
-    return text
-
-
-def render_html(lesson: Lesson) -> str:
-    raw = lesson.md.read_text(encoding="utf-8")
-    lines = raw.splitlines()
-
-    # The wiki convention: an optional category on line 1, then the '# Title'.
-    category = ""
-    body_start = 0
-    for i, line in enumerate(lines):
-        if re.match(r"^#\s+", line):
-            body_start = i + 1
-            break
-        if line.strip() and not category:
-            category = line.strip()
-
-    blocks: list[str] = []
-    buf: list[str] = []
-
-    def flush():
-        if buf:
-            blocks.append("<p>" + inline(" ".join(buf)) + "</p>")
-            buf.clear()
-
-    list_items: list[str] = []
-
-    def flush_list():
-        if list_items:
-            blocks.append("<ul>" + "".join(f"<li>{inline(x)}</li>"
-                                            for x in list_items) + "</ul>")
-            list_items.clear()
-
-    for line in lines[body_start:]:
-        s = line.strip()
-        if not s:
-            flush(); flush_list(); continue
-        m = re.match(r"^(#{2,6})\s+(.+)$", s)
-        if m:
-            flush(); flush_list()
-            lvl = min(len(m.group(1)), 6)
-            blocks.append(f"<h{lvl}>{inline(m.group(2))}</h{lvl}>")
-            continue
-        mi = re.match(r"^[-*]\s+(.+)$", s)
-        if mi:
-            flush()
-            list_items.append(mi.group(1))
-            continue
-        flush_list()
-        buf.append(s)
-    flush(); flush_list()
-
-    # Minimal reading page: just the script (title + the whole article body),
-    # clean serif typography sized for reading aloud. No category kicker, no
-    # instructional bar — nothing but the words you narrate.
-    body = "\n".join(blocks)
-    return f"""<!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(lesson.title)}</title>
-<style>
-  :root {{ color-scheme: light dark; }}
-  body {{ font-family: Georgia, "Times New Roman", serif; line-height: 1.75;
-         max-width: 42rem; margin: 0 auto; padding: 3rem 1.5rem 5rem;
-         font-size: 1.35rem; }}
-  h1 {{ font-size: 2.3rem; line-height: 1.15; margin: 0 0 1.5rem; }}
-  h2 {{ font-size: 1.6rem; margin: 2rem 0 .6rem; }}
-  h3 {{ font-size: 1.3rem; margin: 1.6rem 0 .5rem; }}
-  p {{ margin: 0 0 1.15rem; }}
-  ul {{ margin: 0 0 1.15rem 1.2rem; }}
-  li {{ margin: 0 0 .4rem; }}
-</style></head>
-<body>
-  <h1>{html.escape(lesson.title)}</h1>
-  {body}
-</body></html>"""
-
-
 def pick_next(search: str | None) -> Lesson | None:
     lessons = all_lessons()
     if search:
@@ -217,10 +125,7 @@ def main(argv: list[str]) -> int:
         L = pick_next(search)
         if L is None:
             return 3  # nothing to record
-        fd, path = tempfile.mkstemp(prefix=f"lesson_{L.slug}_", suffix=".html")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(render_html(L))
-        print("\t".join([L.slug, L.title, str(L.md), path]))
+        print("\t".join([L.slug, L.title]))
         return 0
 
     if cmd == "list":

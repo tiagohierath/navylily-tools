@@ -172,6 +172,54 @@ class UploaderSafetyTests(unittest.TestCase):
         health = json.loads(yt.HEALTH_FILE.read_text())
         self.assertEqual(health["status"], "healthy")
 
+    def test_upload_now_selects_exact_video_and_bypasses_daily_guard(self):
+        self.make_video("older.mp4", b"older queued bytes")
+        target = self.make_video("just-recorded.mp4", b"the requested take")
+        self.write_state({
+            "last_upload_iso": self.fixed_now.isoformat(),
+            "uploaded": [],
+            "expected_channel_id": self.channel_id,
+        })
+        captured = {}
+
+        def fake_upload(_service, staged, _title, _publish_at):
+            captured["bytes"] = staged.read_bytes()
+            return "abcdefghijk"
+
+        with mock.patch.object(yt, "get_service", return_value=self.service()), \
+             mock.patch.object(yt, "upload", side_effect=fake_upload):
+            self.assertEqual(self.run_main("--upload-now", str(target)), 0)
+
+        self.assertEqual(captured["bytes"], b"the requested take")
+        self.assertEqual(yt.load_state()["uploaded"][0]["name"], target.name)
+
+    def test_upload_now_refuses_rerender_with_same_logical_name(self):
+        target = self.make_video("lesson.mp4", b"randomized second render")
+        self.write_state({
+            "last_upload_iso": self.fixed_now.isoformat(),
+            "uploaded": [{
+                "key": "a" * 64,
+                "name": target.name,
+                "uploaded_iso": self.fixed_now.isoformat(),
+            }],
+            "expected_channel_id": self.channel_id,
+        })
+
+        with mock.patch.object(yt, "get_service", return_value=self.service()), \
+             mock.patch.object(yt, "upload") as upload:
+            self.assertEqual(
+                self.run_main("--upload-now", str(target)), 0)
+            upload.assert_not_called()
+        state = yt.load_state()
+        self.assertEqual(state.get("queue"), [])
+        self.assertEqual(len(state["uploaded"]), 1)
+
+    def test_reauthorize_forces_fresh_oauth(self):
+        service = self.service()
+        with mock.patch.object(yt, "get_service", return_value=service) as get_service:
+            self.assertEqual(self.run_main("--reauthorize"), 0)
+        get_service.assert_called_once_with(run_oauth=True, force_oauth=True)
+
     def test_uncertain_upload_keeps_durable_pending_and_staged_bytes(self):
         self.make_video()
         service = self.service()

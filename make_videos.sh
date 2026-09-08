@@ -7,9 +7,7 @@
 # as a static frame (no zoom, pan, or animation) and the first 30 seconds carry a
 # watermark set in a classic serif font (Garamond).
 #
-# The audio gets a single denoise filter (afftdn) to knock down steady mic hiss /
-# white noise, and nothing else — no EQ, compression, or loudness normalization.
-# It's otherwise at its original level.
+# Narration gets the shared conservative AM8 voice chain and -14 LUFS loudness.
 #
 # Layout (created automatically if missing):
 #   videos/audio/    -> input audio files (wav, mp3, m4a, flac, ...)
@@ -17,9 +15,7 @@
 #   videos/output/   -> generated videos land here
 #   videos/fonts/    -> bundled EBGaramond.ttf (serif watermark font)
 #
-# AUDIO gets only a single afftdn denoise pass (to remove steady mic hiss) — no
-# EQ, no compression, no loudness normalization — and is otherwise at its
-# original level. VIDEO is tuned for speed at the same visual quality: 1080p only
+# AUDIO gets the shared voice chain. VIDEO is tuned for speed at the same visual quality: 1080p only
 # (never 4k), static frames (no zoom/pan/animation), and each frame encoded
 # exactly ONCE (crf 17, preset fast). Per-image clips are rendered straight to
 # final quality with the watermark baked in, then concatenated with -c copy and
@@ -62,7 +58,8 @@ WORK_DIR="$(mktemp -d)"
 
 WIDTH=1440          # 4:3 at 1080p height (always 1080p, never 4k)
 HEIGHT=1080
-FPS=60              # output frame rate (frames are static — no motion)
+FPS=30              # frames are static (no motion), so 30fps looks identical
+                    # to 60 but halves encode time and file size
 
 # Image on-screen durations (still random per image). For roughly the first
 # FAST_PHASE_SECONDS of the video the images flash by to open with energy; after
@@ -80,18 +77,9 @@ WATERMARK_SECONDS=30
 # Garamond. Override with: FONTFILE=/path/to/font.ttf ./video
 FONTFILE="${FONTFILE:-}"
 
-# Single denoise filter on the narration to knock down steady mic hiss / white
-# noise — afftdn (FFT denoiser). It's deliberately gentle so the voice itself is
-# untouched; nothing else is processed. nf=-25 was too close to 0 (too high a
-# noise floor), which made afftdn treat the quiet consonants at the start/end
-# of words as noise and chew them off; -40 is much closer to ffmpeg's own
-# default (-50) and leaves word onsets/offsets alone. Raise nf (e.g. -20) for
-# more reduction, lower it (e.g. -50) for less, or set VOICE_DENOISE= empty to
-# disable. NOTE: no colon in the expansion. ${VOICE_DENOISE-...} keeps a
-# set-but-empty value empty (denoise disabled, as documented above);
-# ${VOICE_DENOISE:-...} would silently re-enable the default when callers pass
-# VOICE_DENOISE=.
-VOICE_DENOISE="${VOICE_DENOISE-afftdn=nr=12:nf=-40,volume=1.1}"
+# Shared AM8 voice processing; VOICE_DENOISE= disables its light first stage.
+source "$HERE/lib/voice-chain.sh"
+VOICE_PROCESSING="${VOICE_PROCESSING:-1}"
 
 # ---------------------------------------------------------------------------
 # Make sure ffmpeg/ffprobe are available. Auto-wrap with nix's ffmpeg if not.
@@ -117,6 +105,12 @@ if [[ "$_need_nix" == "1" ]]; then
         exit 1
     fi
 fi
+
+# ---------------------------------------------------------------------------
+# Setup folders. Must run before find_font() below, which globs $FONTS_DIR.
+# ---------------------------------------------------------------------------
+mkdir -p "$AUDIO_DIR" "$IMAGES_DIR" "$OUTPUT_DIR" "$FONTS_DIR"
+shopt -s nullglob nocaseglob
 
 # ---------------------------------------------------------------------------
 # Locate the serif font for the watermark.
@@ -145,15 +139,8 @@ if [[ -z "$FONTFILE" ]]; then
     echo "or set FONTFILE=/path/to/font.ttf. Continuing without watermark text." >&2
 fi
 
-# ---------------------------------------------------------------------------
-# Setup folders
-# ---------------------------------------------------------------------------
-mkdir -p "$AUDIO_DIR" "$IMAGES_DIR" "$OUTPUT_DIR" "$FONTS_DIR"
-
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
-
-shopt -s nullglob nocaseglob
 
 audio_files=("$AUDIO_DIR"/*.wav "$AUDIO_DIR"/*.mp3 "$AUDIO_DIR"/*.m4a "$AUDIO_DIR"/*.flac "$AUDIO_DIR"/*.aac "$AUDIO_DIR"/*.ogg)
 image_files=("$IMAGES_DIR"/*.jpg "$IMAGES_DIR"/*.jpeg "$IMAGES_DIR"/*.png)
@@ -201,6 +188,22 @@ echo "Watermark font: ${FONTFILE:-<none>}"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Run ffmpeg quietly, but never swallow a failure: on success nothing is
+# printed (these run hundreds of times per video); on failure the captured
+# output is dumped before exiting, so a broken run is diagnosable instead of
+# just dying silently under set -e. Callers invoking this script itself
+# already redirect its stdout/stderr to their own log (e.g. record_lessons.sh
+# -> render.log), so this naturally lands there too.
+run_ffmpeg() {
+    local log="$WORK_DIR/last_ffmpeg.log"
+    if ! ffmpeg "$@" >"$log" 2>&1; then
+        echo "ERROR: ffmpeg failed:" >&2
+        echo "  ffmpeg $*" >&2
+        cat "$log" >&2
+        exit 1
+    fi
+}
 
 # Random float between MIN and MAX with 4 decimal places.
 random_float() {
@@ -290,22 +293,21 @@ make_image_clip() {
     #   - setsar=1                                         -> square pixels, so a
     #     non-square source SAR can't make it look stretched on playback.
     # The frame is static — no zoom, pan, or animation.
-    ffmpeg -y -loop 1 -i "$img" -t "$duration" -r "$FPS" \
+    run_ffmpeg -y -loop 1 -i "$img" -t "$duration" -r "$FPS" \
         -vf "scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1${dt},format=yuv420p" \
-        -c:v libx264 -preset fast -crf 17 -pix_fmt yuv420p -profile:v high -level 4.2 -an "$out" >/dev/null 2>&1
+        -c:v libx264 -preset fast -crf 17 -pix_fmt yuv420p -profile:v high -level 4.2 -an "$out"
 }
 
 # ---------------------------------------------------------------------------
-# Audio for the video: the source narration is transcoded to a consistent 48kHz
-# stereo wav (so the mux has a uniform format to work with) and gets a single
-# afftdn denoise pass to remove steady mic hiss — nothing else is processed.
-# Set VOICE_DENOISE= empty to skip the denoise. Writes the wav to $2.
+# Audio for the video: apply the shared voice chain and transcode to a uniform
+# 48 kHz stereo WAV. VOICE_PROCESSING=0 is for an already-processed input.
 # ---------------------------------------------------------------------------
 prepare_audio() {
     local in="$1" out="$2"
-    local af=()
-    [[ -n "$VOICE_DENOISE" ]] && af=(-af "$VOICE_DENOISE")
-    ffmpeg -y -i "$in" "${af[@]}" -ar 48000 -ac 2 -c:a pcm_s16le "$out" >/dev/null 2>&1
+    local af="anull"
+    [[ "$VOICE_PROCESSING" == "1" ]] && af="$(voice_full_chain)"
+    run_ffmpeg -y -i "$in" -af "$af" -ar 48000 -ac 2 \
+        -c:a pcm_s16le "$out"
 }
 
 # ---------------------------------------------------------------------------
@@ -361,9 +363,9 @@ for audio in "${audio_files[@]}"; do
     # The slideshow clips are already final-quality H.264 (watermark baked in),
     # so just concat them video-only (no audio yet).
     slides_out="$run_dir/slides.mp4"
-    ffmpeg -y -f concat -safe 0 -i "$concat_list" \
+    run_ffmpeg -y -f concat -safe 0 -i "$concat_list" \
         -c:v copy -an \
-        "$slides_out" >/dev/null 2>&1
+        "$slides_out"
 
     # The slideshow is the complete video track.
     video_out="$slides_out"
@@ -373,12 +375,12 @@ for audio in "${audio_files[@]}"; do
     # source — the video ends exactly when the audio ends, nothing appended.
     echo "  muxing full narration onto video (video copied, audio encoded)..."
     tmp_out="$run_dir/final.mp4"
-    ffmpeg -y -i "$video_out" -i "$audio_wav" \
+    run_ffmpeg -y -i "$video_out" -i "$audio_wav" \
         -map 0:v:0 -map 1:a:0 \
         -af apad -t "$duration" \
         -c:v copy -c:a aac -b:a 320k \
         -movflags +faststart \
-        "$tmp_out" >/dev/null 2>&1
+        "$tmp_out"
 
     # Publish in two steps: WORK_DIR usually lives on another filesystem
     # (/tmp), where a direct mv degrades to a non-atomic copy that the daily
@@ -388,6 +390,11 @@ for audio in "${audio_files[@]}"; do
     cp "$tmp_out" "${out_video}.partial"
     mv -f "${out_video}.partial" "$out_video"
     echo "  done -> $out_video"
+
+    # Free this file's per-image clips now rather than holding every clip from
+    # every file in the batch until the whole run finishes (the EXIT trap
+    # cleans WORK_DIR, but only at the very end).
+    rm -rf "$run_dir"
 done
 
 echo "All videos generated in $OUTPUT_DIR"

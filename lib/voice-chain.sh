@@ -1,35 +1,22 @@
-# voice-chain.sh — the shared "voice cleanup" ffmpeg filter chain: everything
-# BEFORE loudness normalization. Sourced by both audio-clean.sh and
-# make_videos.sh so the denoise / EQ / compression stay identical in both and
-# never drift. Each caller appends its own loudnorm afterwards:
-#   audio-clean.sh -> loudnorm I=-16 (single pass, podcast-ish)
-#   make_videos.sh -> loudnorm I=-14 (two-pass, YouTube)
-#
-# Stages: highpass 80 (rumble) - lowpass 16k (hiss ceiling) - arnndn (RNNoise
-# denoise, needs a .rnnn model) - eq -2dB@250 (de-box) - eq +2dB@3500
-# (presence) - acompressor (even dynamics). attack=20 (was 5) so the
-# compressor doesn't clamp down fast enough to clip the start of words.
+# Shared conservative FIFINE AM8 narration chain. Loudness normalization stays
+# separate because some callers mix system audio after processing the voice.
+VOICE_DENOISE="${VOICE_DENOISE-afftdn=nr=6:nf=-50}"
+VOICE_LOUDNORM_I="${VOICE_LOUDNORM_I:--14}"
+VOICE_LOUDNORM_TP="${VOICE_LOUDNORM_TP:--1}"
+VOICE_LOUDNORM_LRA="${VOICE_LOUDNORM_LRA:-11}"
 
-# Repo root = parent of this lib/ dir.
-_VOICE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-# RNNoise model (override with RNNOISE_MODEL=/path/to/model.rnnn).
-VOICE_RNNOISE_MODEL="${RNNOISE_MODEL:-$_VOICE_ROOT/models/sh.rnnn}"
-
-# Echo the cleanup filter chain — no loudnorm, no trailing comma. Append your
-# own loudnorm after it, e.g.  "$(voice_cleanup_chain),loudnorm=I=-14:..."
+# light denoise -> high-pass -> corrective EQ -> compressor -> de-esser ->
+# -1 dB peak limiter. EQ moves are intentionally small and easy to retune.
 voice_cleanup_chain() {
-    printf '%s' \
-"volume=1.1,highpass=f=80,lowpass=f=16000,arnndn=m='${VOICE_RNNOISE_MODEL}',equalizer=f=250:t=q:w=1:g=-2,equalizer=f=3500:t=q:w=1:g=2,acompressor=threshold=-18dB:ratio=3:attack=20:release=100"
+    local denoise=""
+    [[ -n "$VOICE_DENOISE" ]] && denoise="${VOICE_DENOISE},"
+    printf '%s' "${denoise}highpass=f=80,equalizer=f=220:t=q:w=1:g=-2,equalizer=f=550:t=q:w=1:g=-1,equalizer=f=3200:t=q:w=1:g=1.5,equalizer=f=9000:t=q:w=0.7:g=0.75,acompressor=threshold=-18dB:ratio=3:attack=20:release=100:knee=2.8:makeup=1.5,deesser=i=0.25:m=0.5:f=0.6,alimiter=limit=0.891251:attack=5:release=50:level=false:latency=true"
 }
 
-# True if ffmpeg (arg 1, or the one on PATH) has the arnndn filter.
-# NOTE: capture the output and string-match instead of piping to `grep -q`.
-# `grep -q` closes the pipe on first match (arnndn sorts early in -filters), which
-# SIGPIPEs ffmpeg; under `set -o pipefail` that would falsely report "missing"
-# and, in make_videos.sh, cause an infinite nix re-exec loop.
-voice_ffmpeg_has_arnndn() {
-    local out
-    out="$("${1:-ffmpeg}" -hide_banner -filters 2>/dev/null)" || true
-    [[ "$out" == *arnndn* ]]
+voice_loudnorm_filter() {
+    printf 'loudnorm=I=%s:TP=%s:LRA=%s' "$VOICE_LOUDNORM_I" "$VOICE_LOUDNORM_TP" "$VOICE_LOUDNORM_LRA"
+}
+
+voice_full_chain() {
+    printf '%s,%s' "$(voice_cleanup_chain)" "$(voice_loudnorm_filter)"
 }

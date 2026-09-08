@@ -31,12 +31,14 @@ stops for reconciliation instead of retrying blindly.
 
 ```bash
 ./youtube_upload.sh --authorize   # Google login + pin/verify channel
+./youtube_upload.sh --reauthorize # force a fresh Google login and verify channel
 ./youtube_upload.sh --status      # last upload, cooldown, count
 ./youtube_upload.sh --cadence daily    # every day
 ./youtube_upload.sh --cadence weekly   # Sundays
 ./youtube_upload.sh --cadence monthly  # 1st of the month
 ./youtube_upload.sh --dry-run     # show what it WOULD do, upload nothing
 ./youtube_upload.sh --verify-publications  # verify due videos; never upload
+./youtube_upload.sh --upload-now videos/output/X.mp4  # exact video, immediately
 ./youtube_upload.sh               # upload one video if allowed
 ```
 
@@ -66,6 +68,14 @@ title sidecar. The selected cadence above applies normally. Use
 Secrets and state live in `~/.local/state/navylily-youtube/`, never in the repo.
 After this hardening upgrade, run `--authorize` once again: the uploader now
 needs read-only access to verify and pin the exact destination channel.
+
+`--authorize` reuses a valid token and verifies that it still belongs to the
+pinned channel. `--reauthorize` always opens a fresh browser consent flow and
+replaces the stored token only after that flow succeeds.
+
+After installing the recorder command, the same operations are available from
+any directory as `record youtube authorize`, `record youtube reauth`, and
+`record youtube verify`.
 
 ## Useful settings (env vars)
 

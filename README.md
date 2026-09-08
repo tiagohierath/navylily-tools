@@ -23,11 +23,10 @@ Main tools:
    compression + loudness) into a consistent, broadcast-ish voice file. Tuned
    for a FIFINE USB mic.
 2. **`make_videos.sh`**, turn audio + a folder of images into high-quality,
-   YouTube-ready 4:3 1080p videos with a subtle, smooth 60fps zoom and a
+   YouTube-ready 4:3 1080p videos with a static-frame slideshow and a
    condensed-serif watermark.
-3. **`record_lessons.sh`**, narrate each navylily.tv wiki article into one
-   video from the terminal (light voice cleanup + `make_videos.sh`), auto-
-   detecting which articles you've already done. Feeds `youtube_upload.py`.
+3. **`record_lessons.sh`**, record titled videos from the terminal (light voice
+   cleanup + `make_videos.sh`). Feeds `youtube_upload.py`.
 
 Designed for a declarative/ephemeral NixOS machine: nothing is installed
 system-wide. The scripts fetch their dependencies (`ffmpeg`) into an ephemeral
@@ -94,16 +93,21 @@ The font is bundled (`videos/fonts/Cormorant.ttf`, OFL, see
 
 ## 3. record_lessons.sh
 
-Record one video per wiki article, from the terminal:
+Record titled videos from the terminal:
 
 ```bash
-./record_lessons.sh            # next un-recorded article
-./record_lessons.sh --list     # roster with [x]/[_] recorded marks
-./record_lessons.sh "maos"     # jump to / re-record one by title
+./record_lessons.sh --install  # one time, from this checkout
+record                         # record, render, and post; from any directory
+record "My title"              # or supply the title directly
 ```
 
-Per lesson it opens the article in your browser to read aloud, records your mic
-(FIFINE via the pulse **default** source; press `q` to stop), then:
+The installer adds a symlink in `~/.local/bin`, so repository updates are picked
+up automatically and recordings continue to use this checkout's `videos/`
+directory. Run `record --help` for settings,
+or set `VIDEO_BASE_DIR=/path/to/media` to keep the media tree elsewhere.
+
+For each video it uses your title and records your mic (FIFINE via the pulse
+**default** source; press Enter and confirm to stop), then:
 
 - **Rejects** takes under `MIN_MINUTES` (6) or near-silent (muted/wrong mic).
 - **Light** voice cleanup only: `highpass=80, lowpass=14000, loudnorm`, no
@@ -115,11 +119,9 @@ Per lesson it opens the article in your browser to read aloud, records your mic
 The `youtube_upload.py` timer uploads privately at 18:00 São Paulo and schedules
 each video to become public at 18:00 the next day. Set its persistent
 cadence to daily, weekly (Sunday), or monthly (the first day) with
-`./youtube_upload.sh --cadence ...`. Videos are **private**, titled with the real
-article title, and scheduled to go **public** a day later, giving you 24h to
-set the thumbnail. Recorded state is
-detected from disk (a `videos/audio/*.wav` or `videos/output/*.mp4`), so
-there's nothing to track by hand.
+`./youtube_upload.sh --cadence ...`. Videos are **private**, titled exactly as
+you entered them, and scheduled to go **public** a day later, giving you 24h to
+set the thumbnail.
 
 Change the posting cadence anytime:
 

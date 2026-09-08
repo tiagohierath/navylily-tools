@@ -7,6 +7,8 @@
 # All arguments are passed straight through to youtube_upload.py, e.g.:
 #   ./youtube_upload.sh --dry-run
 #   ./youtube_upload.sh --authorize
+#   ./youtube_upload.sh --reauthorize
+#   ./youtube_upload.sh --upload-now videos/output/example.mp4
 #   ./youtube_upload.sh --status
 #   ./youtube_upload.sh                 # live: at most one upload
 #

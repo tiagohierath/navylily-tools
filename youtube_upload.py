@@ -38,6 +38,8 @@ Usage:
   ./youtube_upload.py --dry-run      # exercise all guards, no API call
   ./youtube_upload.py --status       # print state and exit
   ./youtube_upload.py --authorize    # OAuth, verify, and pin the channel
+  ./youtube_upload.py --reauthorize  # force a fresh browser OAuth flow
+  ./youtube_upload.py --upload-now VIDEO  # upload this exact queued video now
   ./youtube_upload.py --verify-publications  # verify due videos are public
 
 Scheduling is handled outside this script; see install_timer.sh. Use
@@ -504,10 +506,22 @@ def already_uploaded_keys(state: dict) -> set[str]:
     return {e["key"] for e in state.get("uploaded", [])}
 
 
+def already_uploaded_names(state: dict) -> set[str]:
+    """Logical video identities that must not be posted a second time.
+
+    Recorder renders contain randomized slideshow timing, so rendering the same
+    lesson twice produces different bytes.  The stable output filename is the
+    lesson identity and complements the byte hash used for renamed copies.
+    """
+    return {e["name"] for e in state.get("uploaded", [])}
+
+
 def was_uploaded(path: Path, state: dict) -> bool:
-    """Recognize both current content-only and older filename-based records."""
+    """Recognize posted lesson names, current hashes, and legacy hashes."""
     done = already_uploaded_keys(state)
-    return file_key(path) in done or legacy_file_key(path) in done
+    return (path.name in already_uploaded_names(state)
+            or file_key(path) in done
+            or legacy_file_key(path) in done)
 
 
 def pending_upload(state: dict) -> dict | None:
@@ -597,7 +611,9 @@ def sync_queue(state: dict) -> None:
     uploaded = already_uploaded_keys(state)
     done_current_keys = {
         key for key, path in by_key.items()
-        if key in uploaded or legacy_file_key(path) in uploaded
+        if (path.name in already_uploaded_names(state)
+            or key in uploaded
+            or legacy_file_key(path) in uploaded)
     }
     old_queue = state.get("queue", [])
     queue = [entry for entry in old_queue
@@ -655,18 +671,37 @@ def title_for(video: Path) -> str:
     return random_title()
 
 
+def description_for(video: Path) -> str:
+    """Per-video description, if a producer left one next to the file.
+
+    Same sidecar convention as the title: '<name>.description.txt'. LilyFM
+    writes one per episode because its chapter list is generated, and YouTube
+    only renders chapters that live in the description. Anything without a
+    sidecar keeps the shared VIDEO_DESCRIPTION, so the lesson recorder is
+    unaffected."""
+    sidecar = video.with_suffix(".description.txt")
+    try:
+        d = sidecar.read_text(encoding="utf-8").strip()
+    except OSError:
+        d = ""
+    return d[:5000] if d else VIDEO_DESCRIPTION
+
+
 # ---------------------------------------------------------------------------
 # YouTube API (imported lazily so --dry-run/--status work without the libs).
 # ---------------------------------------------------------------------------
-def get_service(run_oauth: bool = True):
+def get_service(run_oauth: bool = True, *, force_oauth: bool = False):
     from google.auth.exceptions import RefreshError
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
 
+    if force_oauth and not run_oauth:
+        raise ValueError("force_oauth requires run_oauth")
+
     creds = None
-    if TOKEN_FILE.exists():
+    if TOKEN_FILE.exists() and not force_oauth:
         try:
             token_info = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
             stored_scopes = token_info.get("scopes", [])
@@ -994,7 +1029,7 @@ def upload(
     body = {
         "snippet": {
             "title": title,
-            "description": VIDEO_DESCRIPTION,
+            "description": description_for(path),
             "tags": VIDEO_TAGS,
             "categoryId": "27",  # Education
         },
@@ -1055,6 +1090,12 @@ def main() -> int:
                         help="print current state and exit")
     action.add_argument("--authorize", action="store_true",
                         help="run OAuth, verify and pin the channel, then exit")
+    action.add_argument(
+        "--reauthorize", action="store_true",
+        help="force fresh browser OAuth, verify the pinned channel, then exit")
+    action.add_argument(
+        "--upload-now", metavar="VIDEO",
+        help="upload this exact video now, bypassing cadence/cooldown guards")
     action.add_argument(
         "--verify-publications", action="store_true",
         help="verify due videos are public; never upload")
@@ -1153,8 +1194,9 @@ def main() -> int:
     state = load_state()
     pending = pending_upload(state)
 
-    if args.authorize:
-        service = get_service(run_oauth=True)
+    if args.authorize or args.reauthorize:
+        service = get_service(
+            run_oauth=True, force_oauth=args.reauthorize)
         verify_expected_channel(service, state, allow_pin=True)
         migrate_legacy_publication_state(state)
         write_health("healthy", "Authorization and pinned channel verified.")
@@ -1246,24 +1288,29 @@ def main() -> int:
         return 1
 
     # ---- Safety #1: persistent same-day + cadence state. ------------------
-    if uploaded_today(state):
-        print("Already uploaded today, exiting (same-day guard).")
-        return 0
-    schedule_block = cadence_schedule_block(state)
-    if schedule_block:
-        print(schedule_block)
-        return 0
-    if cadence(state) == "weekly" and uploaded_this_week(state):
-        print("Already uploaded this week, exiting (weekly guard).")
-        return 0
-    if cadence(state) == "monthly" and uploaded_this_month(state):
-        print("Already uploaded this month, exiting (monthly guard).")
-        return 0
-    remaining = cooldown_remaining(state)
-    if remaining > 0:
-        print(f"Cooldown active: {remaining:.1f}h left before next upload, "
-              "exiting.")
-        return 0
+    # --upload-now is the explicit escape hatch used by the one-command lesson
+    # recorder. It bypasses timing policy, but retains the run lock, exact-byte
+    # duplicate detection, pending-upload reconciliation, channel pinning, and
+    # post-upload verification below.
+    if not args.upload_now:
+        if uploaded_today(state):
+            print("Already uploaded today, exiting (same-day guard).")
+            return 0
+        schedule_block = cadence_schedule_block(state)
+        if schedule_block:
+            print(schedule_block)
+            return 0
+        if cadence(state) == "weekly" and uploaded_this_week(state):
+            print("Already uploaded this week, exiting (weekly guard).")
+            return 0
+        if cadence(state) == "monthly" and uploaded_this_month(state):
+            print("Already uploaded this month, exiting (monthly guard).")
+            return 0
+        remaining = cooldown_remaining(state)
+        if remaining > 0:
+            print(f"Cooldown active: {remaining:.1f}h left before next upload, "
+                  "exiting.")
+            return 0
 
     publish_at = scheduled_publish_at()
     try:
@@ -1281,7 +1328,21 @@ def main() -> int:
     sync_queue(state)
 
     # ---- Safety #2: select exactly one video. -----------------------------
-    video = pick_video(state)
+    if args.upload_now:
+        video = Path(args.upload_now).resolve()
+        try:
+            video.relative_to(OUTPUT_DIR.resolve())
+        except ValueError as e:
+            raise PreUploadError(
+                f"--upload-now video must be inside {OUTPUT_DIR}: {video}") from e
+        if not video.is_file() or video.suffix.lower() not in VIDEO_EXTS:
+            raise PreUploadError(f"--upload-now video does not exist: {video}")
+        if was_uploaded(video, state):
+            print(f"Already uploaded this video or lesson: {video.name}")
+            return 0
+        print("Immediate upload requested; cadence and cooldown guards bypassed.")
+    else:
+        video = pick_video(state)
     if video is None:
         write_health("warning", "Upload queue is empty.")
         print("No new (not-yet-uploaded) videos in output folder, nothing "

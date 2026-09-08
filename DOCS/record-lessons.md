@@ -1,40 +1,58 @@
-# record_lessons.sh
+# Navy Lily recorder
 
 Record narration videos entirely from the terminal. It records your mic, cleans
 the voice, renders the video (images + navylily.tv watermark) in the background,
-and leaves it for the scheduled timer (private at 09:00, public at 18:00).
+uploads it privately to YouTube, and schedules it to become public the next day.
 
-Two ways to use it:
+Every recording is yours: give it a title on the command line, or run the
+command by itself and enter the title when asked.
 
-1. **Wiki mode (just run it).** Goes through the Navy Lily wiki, one article per video. It picks the next article you haven't recorded, opens a clean reading page in the browser, and titles the video with the article's heading.
-2. **Free mode (`--new`).** Any video about anything. You give the title, it starts recording, and everything after that is the same pipeline.
+## Install the command once
+
+From the `navylily-tools` checkout:
+
+```bash
+./record_lessons.sh --install
+```
+
+This adds a `record` command in `~/.local/bin`. It is a symbolic link,
+so edits and `git pull` updates to this checkout take effect immediately. If the
+installer says `~/.local/bin` is not on `PATH`, add the line it prints to your
+shell setup and open a new terminal.
+
+After that, the command works from any directory; recordings still go to this
+checkout's `videos/` tree by default.
 
 ## Commands
 
 ```bash
-./record_lessons.sh                # next un-recorded wiki article, loops
-./record_lessons.sh "maos"         # jump to / re-record a specific article
-./record_lessons.sh --list         # show all articles, [x] = recorded
-./record_lessons.sh --new "Title"  # record a free video with this title
-./record_lessons.sh --new          # same, but it asks for the title first
+record                # record a free video; asks for the title
+record "Title"        # record a video with this title
+record new "Title"    # older spelling; still works
+record --help         # all commands and common settings
+record youtube reauth # fresh Google login + YouTube channel verification
+record youtube verify # verify due videos became public
 ```
+
+The old `./record_lessons.sh --new` form remains compatible. To
+remove only the global command, run `record --uninstall`; the checkout
+and recordings are not removed.
 
 ## How a recording goes
 
-1. Press ENTER to start, press `q` to stop.
-2. Bad takes are caught automatically: shorter than 6 minutes, or near-silent (muted mic), and it offers a re-record.
+1. Press ENTER to start. Press ENTER again and confirm to stop.
+2. Bad takes are caught automatically: shorter than `MIN_MINUTES` (off by default), or near-silent (muted mic), and it offers a re-record.
 3. Then you choose: Keep (just press ENTER), Listen to it first, or Re-record.
 4. The voice gets a light cleanup and the video renders in the background (log: `videos/render.log`). You can already record the next one.
-5. The timer uploads private videos under your exact title at 09:00 on the
-   selected daily, weekly (Sunday), or monthly (first-day) cadence. YouTube
-   flips them public at 18:00, and the verifier checks at 18:15.
+5. As soon as rendering finishes, that exact video uploads privately under your
+   title. YouTube makes it public at the configured time the next day.
 
-## Free mode notes
+## Title and file notes
 
 - The file name comes from the title: "Como cuidar das mãos" becomes `como_cuidar_das_maos.mp4`.
 - If that name already exists it asks before overwriting.
 - After each video it asks for the next title, so you can record several in a row.
-- Short video? `MIN_MINUTES=1 ./record_lessons.sh --new "Aviso rápido"`
+- Short video? `MIN_MINUTES=1 record new "Aviso rápido"`
 
 ## Options (env vars)
 
@@ -42,12 +60,14 @@ Two ways to use it:
 MIC=default        # which pulse mic to record
 MIN_MINUTES=6      # discard takes shorter than this
 CLEAN=light        # light (default) / full (heavy audio-clean.sh) / raw (nothing)
-NO_BROWSER=1       # don't open the article page (wiki mode)
+VIDEO_BASE_DIR=... # put audio, recordings, output, and logs somewhere else
+AUTO_UPLOAD=0      # render and queue only; default 1 posts after rendering
 ```
 
 ## Good to know
 
-- If the posting timer isn't set up, the script warns at startup. Videos still render and queue, they just don't post. Fix: `./youtube_upload.sh --authorize` once, then `./install_timer.sh`.
-- Re-recording an article replaces its old video automatically.
+- Posting after a render does not depend on the timer. The timer remains useful
+  as a fallback for anything already waiting in the queue.
+- Re-recording a title replaces its old video automatically.
 - A take you kept will finish rendering even if you close the terminal.
 - Ctrl-C during Listen only stops the playback, not the script.

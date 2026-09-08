@@ -2,8 +2,8 @@
 #
 # record-screen.sh — record the screen + mic (+ opt-in system/desktop audio)
 # on Hyprland/Wayland, then mux the audio and produce a YouTube-ready .mp4.
-# The audio is left UNPROCESSED; with SYSTEM=1 (for talking over song snippets)
-# the music simply sits a bit under your voice in the mix.
+# The mic gets the shared AM8 narration chain; with SYSTEM=1 the music sits a
+# bit under the processed voice in the mix.
 # Post-the-output-file-straight-to-YouTube simple.
 #
 # What it does:
@@ -13,9 +13,8 @@
 #      into the raw .mkv. With SYSTEM=1, pw-record captures the system output
 #      (default sink monitor) in parallel into a separate raw .wav.
 #   2. You stop it with Ctrl-C (or `q` + Enter); both captures finalize.
-#   3. AFTER recording, the only audio processing is a single afftdn denoise on
-#      the VOICE to remove steady mic hiss / white noise — no EQ, highpass,
-#      compression or loudness normalization. With SYSTEM=1 the system audio
+#   3. AFTER recording, the voice gets denoise, high-pass, EQ, compression,
+#      de-essing, limiting, and -14 LUFS normalization. With SYSTEM=1, system audio
 #      (music) is used as captured, only time-ALIGNED: both captures stop
 #      together, so the mkv/wav duration difference is their start offset, and
 #      the music is trimmed/delayed by exactly that to line up with the video.
@@ -102,15 +101,8 @@ SYS_GAIN_DB="${SYS_GAIN_DB:--8}"
 # Override the system-audio source (a PipeWire node name/id). Empty = the default
 # sink's monitor via pw-record's stream.capture.sink property.
 SYSTEM_AUDIO="${SYSTEM_AUDIO:-}"
-# The ONLY audio processing is a single denoise filter on the voice to knock down
-# steady mic hiss / white noise — afftdn (FFT denoiser), kept gentle so the voice
-# itself is untouched. No EQ, highpass, compression or loudness normalization;
-# the system audio (music) is used exactly as captured. nf=-25 was too close to
-# 0 (too high a noise floor) and chewed the quiet consonants at the start/end
-# of words; -40 sits much closer to ffmpeg's own default (-50) and leaves word
-# onsets/offsets alone. Raise nf (e.g. -20) for more reduction, lower it (e.g.
-# -50) for less, or set VOICE_DENOISE= empty to disable.
-VOICE_DENOISE="${VOICE_DENOISE:-afftdn=nr=12:nf=-40,volume=1.1}"
+# Shared AM8 voice processing; VOICE_DENOISE= disables its light first stage.
+source "$HERE/lib/voice-chain.sh"
 
 # ---------------------------------------------------------------------------
 # Ensure wf-recorder + ffmpeg are available; re-exec inside nix's copies if not
@@ -409,20 +401,16 @@ fi
 echo "Muxing (video copied, audio encoded)..."
 tmp_out="$work/final.mp4"
 if [[ -n "$has_mic" && -n "$has_sys" ]]; then
-    [[ -n "$VOICE_DENOISE" ]] && echo "Denoising voice: $VOICE_DENOISE"
+    echo "Processing voice: AM8 cleanup, compression, de-essing, -14 LUFS"
     sys_vol="$(awk -v g="$SYS_GAIN_DB" 'BEGIN{printf "%.6f", 10^(g/20)}')"
     run_ffmpeg -y -i "$raw" "${sys_in[@]}" \
-        -filter_complex "[0:a:0]${VOICE_DENOISE:-anull}[v];[1:a]${music_delay}volume=${sys_vol}[m];[v][m]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.98:level=false[a]" \
+        -filter_complex "[0:a:0]$(voice_cleanup_chain)[v];[1:a]${music_delay}volume=${sys_vol}[m];[v][m]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.891251:level=false:latency=true,$(voice_loudnorm_filter)[a]" \
         -map 0:v:0 -map "[a]" \
         -c:v copy -c:a aac -b:a 320k "$tmp_out"
 elif [[ -n "$has_mic" ]]; then
-    voice_af=()
-    if [[ -n "$VOICE_DENOISE" ]]; then
-        voice_af=(-af "$VOICE_DENOISE")
-        echo "Denoising voice: $VOICE_DENOISE"
-    fi
+    echo "Processing voice: AM8 cleanup, compression, de-essing, -14 LUFS"
     run_ffmpeg -y -i "$raw" \
-        -map 0:v:0 -map 0:a:0 "${voice_af[@]}" \
+        -map 0:v:0 -map 0:a:0 -af "$(voice_full_chain)" \
         -c:v copy -c:a aac -b:a 320k "$tmp_out"
 elif [[ -n "$has_sys" ]]; then
     music_af=()

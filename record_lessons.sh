@@ -1,45 +1,170 @@
 #!/usr/bin/env bash
 #
-# record_lessons.sh, narrate the Navy Lily wiki, one article per video, all
+# record_lessons.sh, record Navy Lily videos from the terminal, all
 # from the terminal. No Audacity, no DAW: ffmpeg records, make_videos.sh
 # renders (images + navylily.tv watermark), youtube_upload.py posts.
 #
 # What one run does, looping until you stop:
-#   1. Picks the next NOT yet recorded wiki article. Recorded state is derived
-#      from files on disk (see lessons.py), nothing to track by hand.
-#   2. Opens the article in your browser so you can read while you speak.
-#   3. Records the mic with ffmpeg (press q in ffmpeg to stop).
+#   1. Takes the video title from the command line or asks for it.
+#   2. Shows the title in the terminal.
+#   3. Records the mic with ffmpeg (press Enter, then confirm, to stop).
 #   4. Guards the take: under MIN_MINUTES (default 0, off) or near-silent peaks are
 #      treated as misfires and discarded, then you re-record or skip. A kept
 #      take can be played back first ([L]isten).
-#   5. Processes the voice (light by default: highpass, lowpass, loudnorm) and
+#   5. Processes the voice with the shared AM8 narration chain and
 #      renders the video in the background, serialized by a lock.
-#   6. Writes the article title next to the mp4; youtube_upload.py posts it
-#      under that exact wiki title, PRIVATE, at 18:00 on the selected daily,
-#      weekly, or monthly cadence, and YouTube flips it public at 18:00 the
-#      next day (YT_PUBLISH_DELAY_DAYS, default 1).
+#   6. Writes your title next to the mp4 and uploads that exact finished
+#      video to YouTube as PRIVATE. YouTube flips it public at 18:00 the next day
+#      (YT_PUBLISH_DELAY_DAYS, default 1).
 #
-# This script never uploads anything itself; the scheduled timer does the posting.
-#
-# Usage:
-#   ./record_lessons.sh                # work through un-recorded lessons
-#   ./record_lessons.sh "maos"         # jump to / re-record a specific article
-#   ./record_lessons.sh --list         # show every lesson and its recorded mark
-#   ./record_lessons.sh --new "Title"  # record a free video (any topic, not a
-#                                      # wiki article); title given here or asked
-#                                      # interactively. Same pipeline after that:
-#                                      # clean -> render -> auto-post PRIVATE.
+# One-time setup, then usage from any directory:
+#   ./record_lessons.sh --install
+#   record                             # record a free video; asks for its title
+#   record "Title"                     # record a video with this title
+#   record new "Title"                 # compatibility spelling of the same
 #
 # Env overrides:
 #   MIC=default          pulse source (default = system default mic, the FIFINE)
 #   MIN_MINUTES=0        reject recordings shorter than this (0 = no minimum)
 #   CLEAN=light          light (default) / full (audio-clean.sh) / raw (none)
-#   WIKI_DIR=...         where the article .md files live
-#   NO_BROWSER=1         do not open the article in a browser
+#   VIDEO_BASE_DIR=...   where audio, recordings, output, and logs live
+#   AUTO_UPLOAD=1        upload each kept take after rendering (0 = queue only)
 #
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Follow symlinks before resolving the repo directory. This is what lets the
+# ~/.local/bin/record command find make_videos.sh, fonts,
+# and videos regardless of the caller's current working directory.
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_SOURCE" ]]; do
+    SOURCE_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+    SCRIPT_SOURCE="$(readlink "$SCRIPT_SOURCE")"
+    [[ "$SCRIPT_SOURCE" == /* ]] || SCRIPT_SOURCE="$SOURCE_DIR/$SCRIPT_SOURCE"
+done
+HERE="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+SCRIPT_PATH="$HERE/$(basename "$SCRIPT_SOURCE")"
+COMMAND_NAME="record"
+
+usage() {
+    cat <<EOF
+Navy Lily recorder
+
+Install once, from the navylily-tools repository:
+  ./record_lessons.sh --install
+
+Then run from any directory:
+  $COMMAND_NAME                  Record a free-form video (asks for its title)
+  $COMMAND_NAME "Title"          Record a video with this title
+  $COMMAND_NAME new "Title"      Same (older spelling)
+  $COMMAND_NAME youtube reauth   Open a fresh Google/YouTube OAuth flow
+  $COMMAND_NAME youtube verify   Verify due videos became public
+
+Setup:
+  --install                      Add $COMMAND_NAME to ~/.local/bin
+  --uninstall                    Remove that command
+  -h, --help                     Show this help
+
+The older --new spelling still works. Media stays under
+the repository's videos/ directory by default. Set VIDEO_BASE_DIR=/some/path
+to use a different media directory, from anywhere.
+
+Common environment overrides:
+  MIC=default                    PulseAudio/PipeWire microphone source
+  MIN_MINUTES=0                  Reject shorter takes (0 disables the minimum)
+  CLEAN=light                    light, full, or raw voice processing
+  VIDEO_BASE_DIR=/path/to/media  Audio, recordings, output, and render log root
+  AUTO_UPLOAD=1                  Upload after rendering (0 leaves it queued)
+EOF
+}
+
+install_command() {
+    local bin_dir="${NAVYLILY_BIN_DIR:-${HOME:?HOME is not set}/.local/bin}"
+    local command_path="$bin_dir/$COMMAND_NAME"
+
+    mkdir -p "$bin_dir"
+    if [[ -L "$command_path" ]]; then
+        if [[ "$(readlink "$command_path")" == "$SCRIPT_PATH" ]]; then
+            echo "$COMMAND_NAME is already installed: $command_path"
+            return
+        fi
+        echo "ERROR: $command_path is already a different symbolic link." >&2
+        echo "Remove or rename it first, then run --install again." >&2
+        return 1
+    elif [[ -e "$command_path" ]]; then
+        echo "ERROR: $command_path already exists and was left untouched." >&2
+        return 1
+    fi
+
+    ln -s "$SCRIPT_PATH" "$command_path"
+    echo "Installed $COMMAND_NAME -> $SCRIPT_PATH"
+    if [[ ":${PATH:-}:" != *":$bin_dir:"* ]]; then
+        echo
+        echo "$bin_dir is not currently on PATH. Add it to your shell setup."
+        if [[ "$bin_dir" == "$HOME/.local/bin" ]]; then
+            echo 'For Bash/Zsh: export PATH="$HOME/.local/bin:$PATH"'
+        fi
+    else
+        echo "Run '$COMMAND_NAME' from any directory."
+    fi
+}
+
+uninstall_command() {
+    local bin_dir="${NAVYLILY_BIN_DIR:-${HOME:?HOME is not set}/.local/bin}"
+    local command_path="$bin_dir/$COMMAND_NAME"
+
+    if [[ -L "$command_path" && "$(readlink "$command_path")" == "$SCRIPT_PATH" ]]; then
+        rm "$command_path"
+        echo "Removed $command_path (the repository and recordings were untouched)."
+    elif [[ -e "$command_path" || -L "$command_path" ]]; then
+        echo "ERROR: $command_path does not point to this checkout; left untouched." >&2
+        return 1
+    else
+        echo "$COMMAND_NAME is not installed at $command_path."
+    fi
+}
+
+youtube_command() {
+    local action="${1:-status}"
+    case "$action" in
+        authorize|auth) exec "$HERE/youtube_upload.sh" --authorize ;;
+        reauthorize|reauth) exec "$HERE/youtube_upload.sh" --reauthorize ;;
+        verify|verify-publications) exec "$HERE/youtube_upload.sh" --verify-publications ;;
+        status) exec "$HERE/youtube_upload.sh" --status ;;
+        *)
+            echo "Unknown YouTube action: $action" >&2
+            echo "Use: $COMMAND_NAME youtube [status|authorize|reauthorize|verify]" >&2
+            return 2
+            ;;
+    esac
+}
+
+if [[ "${1:-}" == "youtube" ]]; then
+    shift
+    youtube_command "$@"
+fi
+
+# Friendly word-based subcommands; keep the useful existing flags compatible.
+case "${1:-}" in
+    help) shift; set -- --help "$@" ;;
+    install) shift; set -- --install "$@" ;;
+    uninstall) shift; set -- --uninstall "$@" ;;
+    new) shift; set -- --new "$@" ;;
+esac
+
+case "${1:-}" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    --install)
+        install_command
+        exit 0
+        ;;
+    --uninstall)
+        uninstall_command
+        exit 0
+        ;;
+esac
 
 MIC="${MIC:-default}"   # pulse default source (the FIFINE AM8 on this machine)
 MIN_MINUTES="${MIN_MINUTES:-0}"
@@ -51,7 +176,7 @@ MIN_SECONDS="$(awk -v m="$MIN_MINUTES" 'BEGIN{printf "%.0f", m*60}')"
 # denoise disabled (below), so this is the ONLY processing the voice gets.
 #   CLEAN=full   the heavier audio-clean.sh (RNNoise + EQ + compressor)
 #   CLEAN=raw    no processing at all, the capture is used as-is
-#   CLEAN_PRE_AF=...  override the pre-loudnorm filters (highpass/lowpass/gain)
+#   CLEAN_PRE_AF=...  override the shared filters before loudness normalization
 #   CLEAN_LOUDNORM_I=-13  override the loudnorm target (YouTube standard is -14
 #                         LUFS; targeting -13 gives margin since the true-peak
 #                         ceiling below still caps it from ever clipping, and
@@ -64,13 +189,15 @@ MIN_SECONDS="$(awk -v m="$MIN_MINUTES" 'BEGIN{printf "%.0f", m*60}')"
 # too low on YouTube. Two-pass measures the whole file first, so it actually
 # hits the target.
 CLEAN="${CLEAN:-light}"
-CLEAN_PRE_AF="${CLEAN_PRE_AF:-highpass=f=80,lowpass=f=14000}"
-CLEAN_LOUDNORM_I="${CLEAN_LOUDNORM_I:--13}"
+source "$HERE/lib/voice-chain.sh"
+CLEAN_PRE_AF="${CLEAN_PRE_AF:-$(voice_cleanup_chain)}"
+CLEAN_LOUDNORM_I="${CLEAN_LOUDNORM_I:-$VOICE_LOUDNORM_I}"
+AUTO_UPLOAD="${AUTO_UPLOAD:-1}"
 
 # Two-pass loudnorm: $1 input wav, $2 output wav. Uses $FFMPEG/$CLEAN_PRE_AF/
 # $CLEAN_LOUDNORM_I from the enclosing scope.
 two_pass_loudnorm() {
-    local in="$1" out="$2" tp="-1.5" lra=11
+    local in="$1" out="$2" tp="$VOICE_LOUDNORM_TP" lra="$VOICE_LOUDNORM_LRA"
     local measure_af="${CLEAN_PRE_AF},loudnorm=I=${CLEAN_LOUDNORM_I}:TP=${tp}:LRA=${lra}:print_format=json"
     local json; json="$("${FFMPEG[@]}" -hide_banner -nostats -loglevel info -i "$in" -af "$measure_af" -f null - 2>&1)"
     local mi mtp mlra mthresh moffset
@@ -90,34 +217,15 @@ two_pass_loudnorm() {
         -ar 48000 "$out"
 }
 
-VIDEOS_DIR="$HERE/videos"
+VIDEOS_DIR="${VIDEO_BASE_DIR:-$HERE/videos}"
 AUDIO_DIR="${AUDIO_DIR:-$VIDEOS_DIR/audio}"
 OUTPUT_DIR="${OUTPUT_DIR:-$VIDEOS_DIR/output}"
 RAW_DIR="$VIDEOS_DIR/recordings"
 RENDER_LOG="$VIDEOS_DIR/render.log"
 RENDER_LOCK="$VIDEOS_DIR/.render.lock"
-export AUDIO_DIR OUTPUT_DIR   # lessons.py reads these
+export AUDIO_DIR OUTPUT_DIR
 
 mkdir -p "$AUDIO_DIR" "$OUTPUT_DIR" "$RAW_DIR"
-
-# Lessons skipped in THIS session (declined re-record, or "skip this one" at the
-# record prompt). Without this the picker would offer the same lesson again.
-SKIP_SLUGS=""
-export SKIP_SLUGS
-
-# Persistent skip list: lessons you chose to skip for good (you won't record all
-# ~113). One slug per line. Loaded into SKIP_SLUGS every run, so those are never
-# offered again. SKIPPED_COUNT (skipped AND not yet recorded) shrinks the goal
-# the progress bar counts toward, so "all done" means "all the ones you wanted".
-SKIP_FILE="${SKIP_FILE:-$VIDEOS_DIR/skipped.txt}"
-SKIPPED_COUNT=0
-if [[ -f "$SKIP_FILE" ]]; then
-    while read -r _s; do
-        [[ -n "$_s" ]] || continue
-        SKIP_SLUGS="$SKIP_SLUGS $_s"
-        [[ -f "$OUTPUT_DIR/${_s}.mp4" || -f "$AUDIO_DIR/${_s}.wav" ]] || SKIPPED_COUNT=$(( SKIPPED_COUNT + 1 ))
-    done < "$SKIP_FILE"
-fi
 
 # --- ffmpeg: prefer the system one; fall back to nix (this box is ephemeral). -
 if command -v ffmpeg >/dev/null 2>&1; then
@@ -129,15 +237,26 @@ else
     exit 1
 fi
 
-py() { python3 "$HERE/lessons.py" "$@"; }
+video_slug() {
+    python3 - "$1" <<'PY'
+import re
+import sys
+import unicodedata
 
-# Short, stable per-lesson id: first 6 hex of sha256(slug), git-short-SHA style,
+text = unicodedata.normalize("NFKD", sys.argv[1])
+text = "".join(c for c in text if not unicodedata.combining(c)).lower()
+text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+print(text or "video")
+PY
+}
+
+# Short, stable per-video id: first 6 hex of sha256(slug), git-short-SHA style,
 # so every published mp4 gets a unique handle you can match a thumbnail to later
 # (e.g. b32b11_zona_de_conforto.mp4). It's a pure function of the slug, so a
-# re-record or a crash-recovery render of the SAME lesson reuses the SAME id
+# re-record or a crash-recovery render of the SAME video reuses the SAME id
 # (same filename) and overwrites in place, never leaving a second file that would
 # get posted twice. The slug stays in the name too, so even a hash collision
-# can't make two different lessons collide on one filename.
+# can't make two different videos collide on one filename.
 lesson_id() { printf '%s' "$1" | sha256sum | cut -c1-6; }
 
 # WAV duration in whole seconds, read straight from the header (no ffprobe dep).
@@ -150,16 +269,6 @@ try:
 except Exception:
     print(0)
 PY
-}
-
-open_in_browser() {
-    [[ "${NO_BROWSER:-0}" == "1" ]] && return 0
-    local url="$1"
-    if command -v xdg-open >/dev/null 2>&1; then
-        xdg-open "$url" >/dev/null 2>&1 &
-    else
-        echo "Open this to read the article:  $url"
-    fi
 }
 
 fmt_mmss() { printf '%d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
@@ -211,7 +320,20 @@ notify() {
 # (The nice/ionice on each job is a second layer for when renders do run.)
 RENDER_PIDS=()
 
+# Drop any tracked pgid whose process is already gone. Without this,
+# freeze_renders could STOP a finished job's now-recycled PID — an unrelated
+# process that happens to reuse it — since only thaw_renders used to prune.
+prune_dead_renders() {
+    (( ${#RENDER_PIDS[@]} )) || return 0
+    local p live=()
+    for p in "${RENDER_PIDS[@]}"; do
+        kill -0 -"$p" 2>/dev/null && live+=("$p")
+    done
+    RENDER_PIDS=("${live[@]}")
+}
+
 freeze_renders() {
+    prune_dead_renders
     (( ${#RENDER_PIDS[@]} )) || return 0
     local p
     for p in "${RENDER_PIDS[@]}"; do kill -STOP -"$p" 2>/dev/null || true; done
@@ -219,41 +341,19 @@ freeze_renders() {
 
 thaw_renders() {
     (( ${#RENDER_PIDS[@]} )) || return 0
-    local p live=()
-    for p in "${RENDER_PIDS[@]}"; do
-        kill -CONT -"$p" 2>/dev/null || true
-        kill -0 -"$p" 2>/dev/null && live+=("$p")   # drop groups that finished
-    done
-    RENDER_PIDS=("${live[@]}")
+    local p
+    for p in "${RENDER_PIDS[@]}"; do kill -CONT -"$p" 2>/dev/null || true; done
+    prune_dead_renders
 }
 
-# --- Progress bar over the whole wiki roster. --------------------------------
-# TOTAL_LESSONS / BASE_DONE are read once at startup; DONE_THIS_SESSION counts
-# takes committed in this run (their wav marker lands later, in the background,
-# so we can't re-derive it from disk without a race). Bar = base + session.
-TOTAL_LESSONS=0
-BASE_DONE=0
-DONE_THIS_SESSION=0
-SESSION_RECORDED=0   # takes committed this run (wiki + --new), for the summary
+# A recording in progress freezes every render (see below). If this script
+# dies mid-recording — Ctrl-C is the common case — nothing would otherwise
+# ever SIGCONT those jobs: they'd sit SIGSTOP'd forever at 0% CPU with no
+# parent left to thaw them. The EXIT trap fires even on an uncaught signal
+# death, so this guarantees a thaw no matter how the script exits.
+trap thaw_renders EXIT
 
-repeat() { local i out=""; for ((i=0; i<$2; i++)); do out+="$1"; done; printf '%s' "$out"; }
-
-progress_bar() {
-    (( TOTAL_LESSONS > 0 )) || return 0
-    # Count toward the GOAL = every lesson minus the ones you skipped for good,
-    # so 100% means "recorded all the ones you wanted", not all 113.
-    local goal=$(( TOTAL_LESSONS - SKIPPED_COUNT )) width=28
-    (( goal < 1 )) && goal=1
-    local done=$(( BASE_DONE + DONE_THIS_SESSION ))
-    (( done > goal )) && done=$goal
-    local filled=$(( done * width / goal ))
-    local pct=$(( done * 100 / goal ))
-    local extra=""
-    (( SKIPPED_COUNT > 0 )) && extra=" · ${SKIPPED_COUNT} skipped"
-    printf '  Wiki  [%s%s]  %d/%d lessons  (%d%%%s)\n' \
-        "$(repeat '█' "$filled")" "$(repeat '░' $(( width - filled )))" \
-        "$done" "$goal" "$pct" "$extra"
-}
+SESSION_RECORDED=0   # takes committed this run, for the summary
 
 # --- Background voice-clean + render, serialized/niced/freezable. -------------
 # $1 slug  $2 title  $3 (optional) raw wav to voice-clean first. Omit $3 to just
@@ -266,12 +366,21 @@ launch_render() {
     local slug="$1" title="$2" raw="${3:-}"
     local dest="$AUDIO_DIR/${slug}.wav"
     local id; id="$(lesson_id "$slug")"
+    local final="$OUTPUT_DIR/${id}_${slug}.mp4"
     set -m
     (
         trap '' INT HUP
         renice -n 19 -p "$BASHPID" >/dev/null 2>&1 || true
         command -v ionice >/dev/null 2>&1 && ionice -c3 -p "$BASHPID" >/dev/null 2>&1 || true
         flock 9
+        # Another recorder process may have queued recovery for this same wav
+        # while its first render was still waiting/running. Re-check only
+        # recovery jobs after taking the global lock: a deliberate new take
+        # (raw is non-empty) is still allowed to replace an existing render.
+        if [[ -z "$raw" && -f "$final" ]]; then
+            echo "=== $(date '+%F %T')  skip duplicate recovery $slug (already rendered) ===" >>"$RENDER_LOG"
+            exit 0
+        fi
         echo "=== $(date '+%F %T')  render $slug ===" >>"$RENDER_LOG"
         clean_ok=1
         if [[ -n "$raw" ]]; then
@@ -285,10 +394,20 @@ launch_render() {
         fi
         if (( clean_ok )) \
            && rm -f "$OUTPUT_DIR/${slug}.mp4" \
-           && VOICE_DENOISE= "$HERE/make_videos.sh" "$slug" >>"$RENDER_LOG" 2>&1 \
-           && mv -f "$OUTPUT_DIR/${slug}.mp4" "$OUTPUT_DIR/${id}_${slug}.mp4"; then
-            echo "    OK $OUTPUT_DIR/${id}_${slug}.mp4" >>"$RENDER_LOG"
+           && VOICE_PROCESSING=0 "$HERE/make_videos.sh" "$slug" >>"$RENDER_LOG" 2>&1 \
+           && mv -f "$OUTPUT_DIR/${slug}.mp4" "$final"; then
+            echo "    OK $final" >>"$RENDER_LOG"
             notify "Navy Lily" "Rendered: $title"
+            if [[ "$AUTO_UPLOAD" == "1" ]]; then
+                echo "=== $(date '+%F %T')  upload $slug ===" >>"$RENDER_LOG"
+                if YT_OUTPUT_DIR="$OUTPUT_DIR" "$HERE/youtube_upload.sh" \
+                    --upload-now "$final" >>"$RENDER_LOG" 2>&1; then
+                    notify "Navy Lily" "Uploaded to YouTube: $title"
+                else
+                    echo "    FAILED upload for $slug (video remains queued)" >>"$RENDER_LOG"
+                    notify "Navy Lily" "YOUTUBE UPLOAD FAILED: $title (video is still queued)"
+                fi
+            fi
         else
             echo "    FAILED render for $slug (see above)" >>"$RENDER_LOG"
             notify "Navy Lily" "RENDER FAILED: $title (see render.log)"
@@ -299,7 +418,7 @@ launch_render() {
 }
 
 # Resolve MIC=default to the actual pulse source name, so the banner shows which
-# device you're really about to record 10 lessons on (e.g. the FIFINE, not the
+# device you're really about to record several videos on (e.g. FIFINE, not the
 # laptop mic). Falls back to the raw value if pactl isn't around.
 resolved_mic() {
     if [[ "$MIC" == "default" ]] && command -v pactl >/dev/null 2>&1; then
@@ -317,64 +436,36 @@ goodbye() {
     (( SESSION_RECORDED > 0 )) && echo "Recorded ${SESSION_RECORDED} this session."
     local pending=${#RENDER_PIDS[@]}
     if (( pending > 0 )); then
-        echo "⏳ ${pending} still rendering in the background — they keep going"
+        echo "⏳ ${pending} still rendering/uploading in the background — they keep going"
         echo "   even if you close this, and auto-post PRIVATE. Log: $RENDER_LOG"
     fi
     echo "👋"
     exit 0
 }
 
-# --- --list just prints the roster and exits. --------------------------------
-if [[ "${1:-}" == "--list" || "${1:-}" == "-l" ]]; then
-    py list
-    exit 0
-fi
-
-# --- --unskip: manage the permanent skip list. -------------------------------
-#   --unskip           show what you've skipped for good
-#   --unskip <slug>    put a skipped lesson back in rotation
-if [[ "${1:-}" == "--unskip" ]]; then
-    if [[ -z "${2:-}" ]]; then
-        echo "Skipped for good:"
-        [[ -s "$SKIP_FILE" ]] && sed 's/^/  /' "$SKIP_FILE" || echo "  (none)"
-    elif [[ -f "$SKIP_FILE" ]] && grep -qxF "$2" "$SKIP_FILE"; then
-        grep -vxF "$2" "$SKIP_FILE" > "$SKIP_FILE.tmp" && mv "$SKIP_FILE.tmp" "$SKIP_FILE"
-        echo "Un-skipped '$2' — it'll be offered again."
-    else
-        echo "Not in the skip list: ${2:-}"
-    fi
-    exit 0
-fi
-
-# --new: free-form mode. Not a wiki article: you name the video, everything
-# after the title (record, guard, clean, render, auto-post) is identical.
-FREE_MODE=0
-FREE_TITLE=""
+# Every recording is free-form. `new`/`--new` remain accepted for muscle memory,
+# but a plain positional argument is now the title.
+FREE_TITLE="${*:-}"
 if [[ "${1:-}" == "--new" || "${1:-}" == "-n" ]]; then
-    FREE_MODE=1
     shift || true
     FREE_TITLE="${*:-}"
 fi
 
-SEARCH="${1:-}"
-
-# Roster counts for the progress bar (best-effort; stays 0/hidden on any error).
-if counts="$(py count 2>/dev/null)"; then
-    IFS=$'\t' read -r TOTAL_LESSONS BASE_DONE <<<"$counts"
-fi
-
-echo "Navy Lily · lesson recorder"
-progress_bar
+echo "Navy Lily · recorder"
 echo "  mic $(resolved_mic) · min ${MIN_MINUTES}m · clean $CLEAN"
-if systemctl --user is-active navylily-youtube.timer >/dev/null 2>&1; then
-    echo "  posting  ✓ on: selected daily/weekly/monthly cadence at 18:00"
+if [[ "$AUTO_UPLOAD" == "1" ]] && systemctl --user is-active navylily-youtube.timer >/dev/null 2>&1; then
+    echo "  posting  ✓ uploads after each render; timer also watches the queue"
+elif [[ "$AUTO_UPLOAD" == "1" ]]; then
+    echo "  posting  ✓ uploads after each render (timer fallback is off)"
+    echo "           authorize once: $HERE/youtube_upload.sh --authorize"
+elif systemctl --user is-active navylily-youtube.timer >/dev/null 2>&1; then
+    echo "  posting  ✓ direct upload off; timer watches the queue"
 else
-    echo "  posting  ✗ OFF: takes will render + queue but NOT post"
-    echo "           arm once: ./youtube_upload.sh --authorize && ./install_timer.sh"
+    echo "  posting  ✗ OFF: AUTO_UPLOAD=0 and the timer is inactive"
 fi
 
 # Self-heal: a cleaned wav with no finished mp4 is an interrupted/failed render
-# (crash, disk full, laptop slept mid-render). Re-queue those so a lesson that
+# (crash, disk full, laptop slept mid-render). Re-queue those so a video that
 # counts as "recorded" never silently sits un-published. No raw arg => render
 # straight from the wav that already exists.
 _healed=0
@@ -389,80 +480,48 @@ for _wav in "$AUDIO_DIR"/*.wav; do
     launch_render "$_s" "$_t"
     _healed=$(( _healed + 1 ))
 done
+# A raw take whose cleaned wav was never produced (the recorder was killed —
+# e.g. Ctrl-C — before launch_render's clean step ran) has no file in
+# AUDIO_DIR, so the loop above can't see it: it would otherwise sit in
+# recordings/ forever, invisible to every future run. Pick those up too, same
+# as a fresh take (raw arg triggers the clean step).
+for _raw in "$RAW_DIR"/*.raw.wav; do
+    _s="$(basename "$_raw" .raw.wav)"
+    _id="$(lesson_id "$_s")"
+    [[ -f "$AUDIO_DIR/${_s}.wav" ]] && continue
+    [[ -f "$OUTPUT_DIR/${_id}_${_s}.mp4" || -f "$OUTPUT_DIR/${_s}.mp4" ]] && continue
+    _t="$_s"; [[ -f "$OUTPUT_DIR/${_id}_${_s}.title.txt" ]] && _t="$(cat "$OUTPUT_DIR/${_id}_${_s}.title.txt")"
+    launch_render "$_s" "$_t" "$_raw"
+    _healed=$(( _healed + 1 ))
+done
 shopt -u nullglob
 (( _healed > 0 )) && echo "  ↻ re-queued ${_healed} unfinished render(s) from before"
 echo
 
 while :; do
-    if (( FREE_MODE )); then
-        # Free-form: title comes from you, not the wiki.
-        while [[ -z "$FREE_TITLE" ]]; do
-            read -r -p "Video title: " FREE_TITLE || exit 0
-        done
-        title="$FREE_TITLE"
-        slug="$(py slug "$title")"
-        html_path=""
-        FREE_TITLE=""   # next round asks again
-        if [[ -f "$OUTPUT_DIR/$(lesson_id "$slug")_${slug}.mp4" || -f "$OUTPUT_DIR/${slug}.mp4" || -f "$AUDIO_DIR/${slug}.wav" ]]; then
-            read -r -p "'$slug' already exists. Overwrite it? [y/N] " a || exit 0
-            [[ "$a" =~ ^[Yy] ]] || continue
-        fi
-        echo "────────────────────────────────────────────────────────"
-        echo "▶ Video:  $title"
-        echo
-    else
-    # Pick the lesson: the search term (if any) on the first pass, then always
-    # the next un-recorded, minus the ones skipped this session.
-    if line="$(py next ${SEARCH:+"$SEARCH"})"; then
-        :
-    else
-        rc=$?
-        if [[ $rc -eq 3 ]]; then
-            if [[ -n "$SEARCH" ]]; then
-                echo "No lesson matches: $SEARCH"
-            else
-                echo
-                progress_bar
-                if (( TOTAL_LESSONS > 0 && BASE_DONE + DONE_THIS_SESSION >= TOTAL_LESSONS - SKIPPED_COUNT )); then
-                    echo "🎉 All done! Recorded every lesson you wanted"
-                    (( SKIPPED_COUNT > 0 )) && echo "   (${SKIPPED_COUNT} skipped on purpose)."
-                else
-                    echo "Nothing left this session — the rest were skipped for now. Re-run to revisit."
-                fi
-            fi
-            goodbye
-        fi
-        exit $rc
+    while [[ -z "$FREE_TITLE" ]]; do
+        read -r -p "Video title: " FREE_TITLE || exit 0
+    done
+    title="$FREE_TITLE"
+    slug="$(video_slug "$title")"
+    FREE_TITLE=""   # next round asks again
+    if [[ -f "$OUTPUT_DIR/$(lesson_id "$slug")_${slug}.mp4" || -f "$OUTPUT_DIR/${slug}.mp4" || -f "$AUDIO_DIR/${slug}.wav" ]]; then
+        read -r -p "'$slug' already exists. Overwrite it? [y/N] " a || exit 0
+        [[ "$a" =~ ^[Yy] ]] || continue
     fi
-    SEARCH=""   # only honor the search term once
-
-    IFS=$'\t' read -r slug title md_path html_path <<<"$line"
-
     echo "────────────────────────────────────────────────────────"
-    progress_bar
-    echo "▶ Lesson:  $title"
-    echo "  script opened in your browser — read it aloud while you record"
-    open_in_browser "file://$html_path"
+    echo "▶ Video:  $title"
     echo
-    fi
 
     raw="$RAW_DIR/${slug}.raw.wav"
 
     while :; do
-        read -r -p "ENTER to record · 's' skip this lesson · 'q' quit… " _ans || exit 0
+        read -r -p "ENTER to record · 's' skip this video · 'q' quit… " _ans || exit 0
         case "${_ans,,}" in
             q|quit) goodbye ;;
             s|skip)
                 # Skip for good: remember it so it's never offered again, and
-                # (in --new mode there's no slug/file, so guard on FREE_MODE).
-                if (( FREE_MODE )); then
-                    echo "  ↷ skipped."
-                else
-                    printf '%s\n' "$slug" >> "$SKIP_FILE"
-                    SKIP_SLUGS="$SKIP_SLUGS $slug"
-                    SKIPPED_COUNT=$(( SKIPPED_COUNT + 1 ))
-                    echo "  ↷ skipped '$title' — won't be offered again."
-                fi
+                echo "  ↷ skipped."
                 break ;;   # no raw exists, so the guard below moves to the next
         esac
         # Freeze any in-flight render so the capture has the whole CPU (no
@@ -507,8 +566,8 @@ while :; do
             echo "⚠  Under ${MIN_MINUTES} min ($(fmt_mmss "$dur")): treating as a"
             echo "   misfire and discarding it (nothing will be posted)."
             rm -f "$raw"
-            read -r -p "Re-record this lesson? [Y/n] " a || exit 0
-            [[ "$a" =~ ^[Nn] ]] && { echo "Skipping '$title' for now."; SKIP_SLUGS="$SKIP_SLUGS $slug"; break; }
+            read -r -p "Re-record this video? [Y/n] " a || exit 0
+            [[ "$a" =~ ^[Nn] ]] && { echo "Skipping '$title' for now."; break; }
             continue
         fi
 
@@ -519,8 +578,8 @@ while :; do
             echo "⚠  Peak level ${peak} dBFS is near-silent (threshold ${PEAK_SILENCE_DBFS} dBFS)."
             echo "   The mic may be muted or set to the wrong source. Discarding this take."
             rm -f "$raw"
-            read -r -p "Re-record this lesson? [Y/n] " a || exit 0
-            [[ "$a" =~ ^[Nn] ]] && { echo "Skipping '$title' for now."; SKIP_SLUGS="$SKIP_SLUGS $slug"; break; }
+            read -r -p "Re-record this video? [Y/n] " a || exit 0
+            [[ "$a" =~ ^[Nn] ]] && { echo "Skipping '$title' for now."; break; }
             continue
         fi
 
@@ -539,21 +598,11 @@ while :; do
         break
     done
     # If we broke out because the user declined to re-record a bad take, the
-    # raw file is gone and no audio exists: move on to the next lesson.
-    [[ -f "$raw" ]] || { [[ -n "$html_path" ]] && rm -f "$html_path"; continue; }
+    # raw file is gone and no audio exists: move on to the next video.
+    [[ -f "$raw" ]] || continue
 
-    # This take is committed. Mark the slug done for THIS session right away so
-    # the picker never offers it again. The on-disk "recorded" marker (the wav
-    # in AUDIO_DIR) is now written by the BACKGROUND job, which may be queued
-    # behind an earlier render, so it won't exist yet when the loop asks for the
-    # next lesson. Without this line `py next` would re-hand-you the lesson you
-    # just recorded, and a second take would clobber the raw the background job
-    # is still reading. Harmless in --new mode (no picker consults SKIP_SLUGS).
-    SKIP_SLUGS="$SKIP_SLUGS $slug"
-
-    # Title sidecar next to the eventual mp4 (SAME id-prefixed basename the mp4
-    # will get), so youtube_upload.py reads it and posts under the real wiki
-    # title instead of a random one.
+    # Title sidecar next to the eventual mp4 (same id-prefixed basename the mp4
+    # will get), so youtube_upload.py posts exactly the title you supplied.
     printf '%s\n' "$title" > "$OUTPUT_DIR/$(lesson_id "$slug")_${slug}.title.txt"
 
     # Hand off to the background: voice-clean this raw take, then render. You're
@@ -562,18 +611,13 @@ while :; do
     launch_render "$slug" "$title" "$raw"
 
     SESSION_RECORDED=$(( SESSION_RECORDED + 1 ))
-    (( FREE_MODE )) || DONE_THIS_SESSION=$(( DONE_THIS_SESSION + 1 ))
-    echo "✓ '$title' saved · rendering in background · auto-posts PRIVATE (1/day, public ~24h after upload)"
-    (( FREE_MODE )) || progress_bar
-    [[ -n "$html_path" ]] && rm -f "$html_path"
-    echo
-    if (( FREE_MODE )); then
-        read -r -p "Record another video? [Y/n] " a || exit 0
-        [[ "$a" =~ ^[Nn] ]] && goodbye
-        echo
-        continue
+    if [[ "$AUTO_UPLOAD" == "1" ]]; then
+        echo "✓ '$title' saved · rendering, then posting PRIVATE to YouTube"
+    else
+        echo "✓ '$title' saved · rendering in background · left in the upload queue"
     fi
-    read -r -p "Record the next lesson? [Y/n] " a || exit 0
+    echo
+    read -r -p "Record another video? [Y/n] " a || exit 0
     [[ "$a" =~ ^[Nn] ]] && goodbye
     echo
 done

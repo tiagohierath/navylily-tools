@@ -13,14 +13,17 @@ recording/upload support.
 
 ## The whole pipeline in one line
 
-Record with `record_lessons.sh`; it cleans the voice and renders the video. The
-timer uploads privately at 09:00 on your selected cadence and YouTube makes it
-public at 18:00 the same day. A second timer verifies publication at 18:15.
+Run `record`; it captures and cleans the voice, renders the video, and uploads
+that exact result privately. YouTube makes it public at the configured time the
+next day, and the verification timer checks the publication afterward.
 
 ## Quick start
 
 ```bash
 cd ~/projects/navylily-tools
+
+# one-time command setup
+./record_lessons.sh --install
 
 # one-time YouTube setup (opens a browser)
 mkdir -p ~/.local/state/navylily-youtube
@@ -29,8 +32,8 @@ cp ~/Downloads/client_secret_*.json ~/.local/state/navylily-youtube/client_secre
 ./install_timer.sh
 
 # then just record
-./record_lessons.sh              # narrate the next wiki article
-./record_lessons.sh --new "X"    # or record a video about anything
+record                            # record, render, and post, from anywhere
+record new "X"                    # or record a video about anything
 ```
 
 ## Where things live

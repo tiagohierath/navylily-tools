@@ -505,7 +505,13 @@ while :; do
     title="$FREE_TITLE"
     slug="$(video_slug "$title")"
     FREE_TITLE=""   # next round asks again
-    if [[ -f "$OUTPUT_DIR/$(lesson_id "$slug")_${slug}.mp4" || -f "$OUTPUT_DIR/${slug}.mp4" || -f "$AUDIO_DIR/${slug}.wav" ]]; then
+    # Also guard on a still-raw take (checked last since it's the rarer case):
+    # the self-heal pass above can still be cleaning an old crashed take's raw
+    # file in the background, with neither a .wav nor an .mp4 yet to show for
+    # it. Without this check, typing the same title now would start recording
+    # straight over that file while the background job might still be reading
+    # it. Prompting here turns a silent race into an explicit, informed choice.
+    if [[ -f "$OUTPUT_DIR/$(lesson_id "$slug")_${slug}.mp4" || -f "$OUTPUT_DIR/${slug}.mp4" || -f "$AUDIO_DIR/${slug}.wav" || -f "$RAW_DIR/${slug}.raw.wav" ]]; then
         read -r -p "'$slug' already exists. Overwrite it? [y/N] " a || exit 0
         [[ "$a" =~ ^[Yy] ]] || continue
     fi

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>lilydrop</title>
+  <link rel="stylesheet" href="/pictogrep-studio/web/pictogrep.css">
+</head>
+<body>
+  <main class="empty" style="max-width:520px;margin:0 auto;padding:15vh 24px">
+    <p class="eyebrow">lilydrop</p>
+    <h1 id="title">Download assets</h1>
+    <p id="file" class="loading-message">Loading share…</p>
+    <p id="expires"></p>
+    <p><a id="download" class="primary" href="#">Download assets</a></p>
+    <p><button id="copy" type="button">Copy agent command</button></p>
+    <p id="status" role="status"></p>
+  </main>
+  <script>
+    const file = decodeURIComponent(location.pathname.split('/').pop() || 'assets.tar.gz');
+    const download = document.querySelector('#download');
+    document.querySelector('#file').textContent = file;
+    download.href = location.pathname + '/' + encodeURIComponent(file);
+    document.querySelector('#expires').textContent = 'This share expires automatically after one week.';
+    document.querySelector('#copy').onclick = async () => {
+      await navigator.clipboard.writeText(`curl -fL -C - '${location.origin}${download.pathname}' -o '${file}'`);
+      document.querySelector('#status').textContent = 'Agent command copied.';
+    };
+  </script>
+</body>
+</html>

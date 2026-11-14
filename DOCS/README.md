@@ -10,6 +10,7 @@ recording/upload support.
 - [audio-clean.md](audio-clean.md): clean raw mic audio by itself
 - [youtube-upload.md](youtube-upload.md): upload queued videos to YouTube, private
 - [scheduling.md](scheduling.md): selectable daily, weekly, or monthly posting
+- [lilydrop.md](lilydrop.md): publish short-lived, project-labelled deliveries
 
 ## The whole pipeline in one line
 

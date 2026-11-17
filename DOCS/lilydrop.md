@@ -65,6 +65,38 @@ If the files change, publish a new delivery number instead:
 Revoked and expired links return a clear `410` page. A revoked link cannot be
 re-enabled.
 
+## Link preview
+
+Publishing automatically creates a link preview for Discord and other chat
+clients. Lilydrop uses the first PDF in sorted path order and renders its first
+page. If there is no PDF, it uses the first JPEG, PNG or WebP image. The JPEG
+preview has a maximum dimension of 1200 pixels. The title and description
+include the project, delivery, file count, size and expiry.
+
+PDF rendering uses Poppler (`pdftoppm`); images use ImageMagick (`magick`).
+If the tool is missing and Nix is available, Lilydrop runs it through `nix shell`.
+Rendering failures produce a warning; the delivery remains available with a
+text preview. To retry or choose a specific cover for an existing delivery:
+
+```sh
+cd /home/tiago/projects/vexian2026
+../navylily-tools/lilydrop.py preview vexian 1 \
+  To-deliver-1/PanopticOS-Groundwork.pdf --allow-root .
+```
+
+The page advertises the image at the existing share URL plus `/preview.jpg`.
+It requires the same token and expires or revokes with the share. No new share
+or expiry is created. Chat services may retain a cached preview after expiry.
+After adding a preview, repost the link; an existing message may stay cached.
+Use a new query string (for example `?preview=2`) when testing a refreshed
+preview. This keeps the token and expiry unchanged. Discord still controls
+whether an embed is displayed; preview metadata cannot override user or
+channel embed settings.
+
+The default ledger is `.state/lilydrop/shares.json` in this repository.
+If `LILYDROP_STATE` is set, both publisher and server must use the same value.
+Never substitute temporary state when publishing a production link.
+
 ## Safety and storage
 
 Lilydrop does not need `sudo` and should not run as root. Sudo grants process

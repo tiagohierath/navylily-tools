@@ -5,6 +5,7 @@ token*.json
 *.key
 
 # Local state
+.state/
 state.json
 *.lock
 

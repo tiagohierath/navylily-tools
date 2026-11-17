@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -11,6 +12,7 @@ import re
 import secrets
 import shlex
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -26,7 +28,10 @@ PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 def state_path() -> Path:
-    return Path(os.environ.get("LILYDROP_STATE", str(Path.home() / ".local/state/lilydrop/shares.json")))
+    # The service uses the project-local ledger. Keep the CLI default aligned
+    # with it so a published share is immediately visible to the live server.
+    default = Path(__file__).resolve().parent / ".state/lilydrop/shares.json"
+    return Path(os.environ.get("LILYDROP_STATE", str(default)))
 
 
 def empty_state() -> dict:
@@ -262,7 +267,67 @@ def publish_command(args: argparse.Namespace) -> None:
     }
     token = issue_share(state, key, args.days)
     save_state(state)
+    try:
+        create_preview(source, package.parent)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"Preview unavailable: {error}. Retry with the preview command.", file=sys.stderr)
     print(f"{args.base_url.rstrip('/')}/{project}/{args.delivery}/{token}")
+
+
+def preview_source(source: Path) -> Path | None:
+    files = sorted(source.rglob("*")) if source.is_dir() else [source]
+    for extensions in ({".pdf"}, {".jpg", ".jpeg", ".png", ".webp"}):
+        for candidate in files:
+            if candidate.is_file() and candidate.suffix.lower() in extensions:
+                if candidate.is_symlink() or (source.is_dir() and not candidate.resolve().is_relative_to(source.resolve())):
+                    raise ValueError("preview source must not follow symlinks")
+                return candidate
+    return None
+
+
+def render_tool(binary: str, package: str) -> list[str]:
+    executable = shutil.which(binary)
+    if executable:
+        return [executable]
+    if shutil.which("nix"):
+        return ["nix", "shell", f"nixpkgs#{package}", "--command", binary]
+    raise ValueError(f"install {package} ({binary}) to generate previews")
+
+
+def create_preview(source: Path, directory: Path) -> Path | None:
+    if source.is_file() and source.name == "lilydrop-preview.jpg":
+        raise ValueError("this filename is reserved for the preview; rename the source image")
+    selected = preview_source(source)
+    if selected is None:
+        print("Preview: no PDF or supported image found")
+        return None
+    with tempfile.TemporaryDirectory(prefix=".preview-", dir=directory) as scratch:
+        output = Path(scratch) / "cover.jpg"
+        if selected.suffix.lower() == ".pdf":
+            command = render_tool("pdftoppm", "poppler-utils") + [
+                "-f", "1", "-singlefile", "-scale-to", "1200", "-jpeg", "-jpegopt", "quality=90",
+                str(selected), str(output.with_suffix(""))]
+        else:
+            command = render_tool("magick", "imagemagick") + [
+                str(selected) + "[0]", "-auto-orient", "-background", "white", "-alpha", "remove",
+                "-alpha", "off", "-resize", "1200x1200>", "-strip", "-quality", "90", str(output)]
+        subprocess.run(command, check=True, capture_output=True, timeout=180)
+        if not output.is_file() or output.stat().st_size == 0:
+            raise ValueError("renderer produced no cover image")
+        destination = directory / "lilydrop-preview.jpg"
+        output.chmod(0o600)
+        os.replace(output, destination)
+    print(f"Preview: {selected.name}")
+    return destination
+
+
+def preview_command(args: argparse.Namespace) -> None:
+    source = approved_source(Path(args.path), Path(args.allow_root))
+    state = load_state()
+    key = delivery_key(validate_project(args.project), args.delivery)
+    if key not in state["deliveries"]:
+        raise ValueError(f"delivery does not exist: {key}")
+    create_preview(source, Path(state["deliveries"][key]["package_path"]).parent)
 
 
 def reshare_command(args: argparse.Namespace) -> None:
@@ -289,10 +354,22 @@ def share_for_route(state: dict, token: str) -> dict | None:
     return state["shares"].get(token)
 
 
-def page(title: str, content: str) -> bytes:
+def page(title: str, content: str, *, description: str = "", image_url: str = "") -> bytes:
+    metadata = ""
+    if description:
+        tags = {"og:type": "website", "og:site_name": "lilydrop", "og:title": title,
+                "og:description": description, "theme-color": "#c6b990"}
+        if image_url:
+            tags.update({"og:image": image_url, "og:image:type": "image/jpeg",
+                         "og:image:alt": f"{title} — cover image", "twitter:card": "summary_large_image"})
+        metadata = "\n".join(
+            f'<meta {"property" if key.startswith("og:") else "name"}="{key}" content="{html.escape(value, quote=True)}">'
+            for key, value in tags.items()
+        )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)}</title>
+{metadata}
 <style>
 body{{margin:0;background:#10100f;color:#f2f2f0;font:15px system-ui,sans-serif}}
 main{{width:min(560px,calc(100% - 32px));margin:0 auto;padding:56px 0}}
@@ -322,7 +399,8 @@ def send_html(handler: BaseHTTPRequestHandler, body: bytes, status: int) -> None
         handler.wfile.write(body)
 
 
-def send_download(handler: BaseHTTPRequestHandler, file_path: Path, filename: str) -> None:
+def send_download(handler: BaseHTTPRequestHandler, file_path: Path, filename: str,
+                  *, content_type: str = "application/octet-stream", inline: bool = False) -> None:
     if not file_path.is_file():
         handler.send_error(404)
         return
@@ -351,10 +429,11 @@ def send_download(handler: BaseHTTPRequestHandler, file_path: Path, filename: st
         status = 206
     safe_name = filename.replace("\\", "_").replace('"', "'")
     handler.send_response(status)
-    handler.send_header("Content-Type", "application/octet-stream")
+    handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(end - start + 1))
     handler.send_header("Accept-Ranges", "bytes")
-    handler.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
+    disposition = "inline" if inline else "attachment"
+    handler.send_header("Content-Disposition", f'{disposition}; filename="{safe_name}"')
     handler.send_header("Cache-Control", "private, no-store")
     if status == 206:
         handler.send_header("Content-Range", f"bytes {start}-{end}/{size}")
@@ -417,6 +496,11 @@ def serve_command(args: argparse.Namespace) -> None:
                 message = "This delivery link has expired." if status == "expired" else "This delivery link has been revoked."
                 send_html(self, page(f"{display_project} · {label}", f"<section class='card'><p class='eyebrow'>lilydrop</p><h1>{html.escape(display_project)}<br><span>{html.escape(label)}</span></h1><p>{message}</p></section>"), 410)
                 return
+            preview = file_path.parent / "lilydrop-preview.jpg" if delivery else None
+            has_preview = preview is not None and preview.is_file()
+            if filename == "preview.jpg" and has_preview:
+                send_download(self, preview, "preview.jpg", content_type="image/jpeg", inline=True)
+                return
             if filename is not None and filename != name:
                 self.send_error(404)
                 return
@@ -439,7 +523,12 @@ def serve_command(args: argparse.Namespace) -> None:
 <div class='actions'><a class='primary' href='{html.escape(download_path, quote=True)}'>Download</a><button id='copy' type='button'>Copy for agent</button></div>
 <p id='status' class='note' role='status'>This share closes automatically at the time shown above. Interrupted downloads can resume.</p>
 </section><script>document.querySelector('#copy').onclick=async()=>{{await navigator.clipboard.writeText({json.dumps(command)});document.querySelector('#status').textContent='Agent command copied.'}}</script>"""
-            send_html(self, page(f"{display_project} · {label}", body), 200)
+            description = f"{file_count} files · {human_size(package_size)} · Available until {utc_label(share.get('expires_at'))}."
+            image_url = f"{scheme}://{host}{base_path}/preview.jpg" if has_preview else ""
+            if has_preview:
+                image_url += "?v=" + hashlib.sha256(preview.read_bytes()).hexdigest()[:12]
+            send_html(self, page(f"{display_project} · {label}", body,
+                                 description=description, image_url=image_url), 200)
 
         def do_HEAD(self) -> None:
             self.do_GET()
@@ -470,6 +559,11 @@ def build_parser() -> argparse.ArgumentParser:
     reshare.add_argument("--base-url", default="https://files.navylily.tv")
     revoke = commands.add_parser("revoke", help="revoke a share token")
     revoke.add_argument("token")
+    preview = commands.add_parser("preview", help="generate or refresh a delivery's automatic link preview")
+    preview.add_argument("project")
+    preview.add_argument("delivery", type=int)
+    preview.add_argument("path", help="delivery folder, PDF or image")
+    preview.add_argument("--allow-root", default=".")
     serve = commands.add_parser("serve", help="run the local HTTP server")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8787)
@@ -488,7 +582,9 @@ def main(argv: list[str] | None = None) -> int:
             revoke_command(args)
         elif args.command == "serve":
             serve_command(args)
-    except (OSError, ValueError, json.JSONDecodeError) as error:
+        elif args.command == "preview":
+            preview_command(args)
+    except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as error:
         parser.error(str(error))
     return 0
 

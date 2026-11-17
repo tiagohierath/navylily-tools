@@ -1,0 +1,14 @@
+[Unit]
+Description=lilydrop expiring asset shares (user service)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/tiago/projects/navylily-tools
+Environment=LILYDROP_STATE=/home/tiago/projects/navylily-tools/.state/lilydrop/shares.json
+ExecStart=/run/current-system/sw/bin/python3 /home/tiago/projects/navylily-tools/lilydrop.py serve
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

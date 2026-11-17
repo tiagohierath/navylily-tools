@@ -2,6 +2,8 @@
 
 Lilydrop publishes numbered project deliveries as short-lived download links.
 The delivery stays in the project history. Each share link expires separately.
+Directory deliveries are packaged as ZIP files for easy extraction on Windows,
+macOS, and Linux. Existing TAR.GZ deliveries remain available unchanged.
 
 ## Publish a delivery
 

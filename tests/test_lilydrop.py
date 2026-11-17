@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import threading
 import time
+import zipfile
 from argparse import Namespace
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -78,6 +79,20 @@ class LilydropTest(unittest.TestCase):
             lilydrop.approved_source(project_root / "manifest.json", workspace)
         with self.assertRaises(ValueError):
             lilydrop.approved_source(project_root / "manifest.json", Path.home())
+
+    def test_directory_deliveries_are_zip_archives(self):
+        source = Path(self.temp_dir.name) / "To-deliver-1"
+        source.mkdir()
+        (source / "art.txt").write_text("approved")
+        (source / "empty-folder").mkdir()
+        package, file_count, source_size = lilydrop.package_source(source, "vexian", 1)
+
+        self.assertEqual(package.suffix, ".zip")
+        self.assertEqual(file_count, 1)
+        self.assertEqual(source_size, len("approved"))
+        with zipfile.ZipFile(package) as archive:
+            self.assertEqual(archive.read("To-deliver-1/art.txt"), b"approved")
+            self.assertIn("To-deliver-1/empty-folder/", archive.namelist())
 
     def test_preview_http_and_share_access(self):
         root = Path(self.temp_dir.name)

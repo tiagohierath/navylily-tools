@@ -14,9 +14,9 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
+import zipfile
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -220,11 +220,20 @@ def package_source(source: Path, project: str, number: int) -> tuple[Path, int, 
     package_dir.mkdir(parents=True, exist_ok=False)
     file_count, source_size = source_stats(source)
     if source.is_dir():
-        package = package_dir / f"{project}-deliverables-{number:02d}.tar.gz"
-        temporary = temporary_file(package_dir, ".tar.gz")
+        # ZIP is natively supported by Windows and remains broadly portable.
+        # Existing deliveries keep their recorded package type and remain
+        # downloadable; only newly published directory deliveries use ZIP.
+        package = package_dir / f"{project}-deliverables-{number:02d}.zip"
+        temporary = temporary_file(package_dir, ".zip")
         try:
-            with tarfile.open(temporary, "w:gz") as archive:
-                archive.add(source, arcname=source.name, recursive=True)
+            with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(f"{source.name}/", "")
+                for path in sorted(source.rglob("*")):
+                    arcname = Path(source.name) / path.relative_to(source)
+                    if path.is_dir():
+                        archive.writestr(f"{arcname.as_posix()}/", "")
+                    elif path.is_file():
+                        archive.write(path, arcname=arcname)
             os.replace(temporary, package)
         finally:
             temporary.unlink(missing_ok=True)
@@ -348,6 +357,27 @@ def revoke_command(args: argparse.Namespace) -> None:
         raise ValueError(f"share does not exist: {args.token}")
     share["revoked_at"] = time.time()
     save_state(state)
+
+
+def list_command(args: argparse.Namespace) -> None:
+    """List deliveries and share links without changing the ledger."""
+    state = load_state()
+    project = validate_project(args.project) if args.project else None
+    deliveries = sorted(state.get("deliveries", {}).values(),
+                        key=lambda item: (item.get("project_id", ""), int(item.get("number", 0))))
+    if project:
+        deliveries = [item for item in deliveries if item.get("project_id") == project]
+    if not deliveries:
+        print("No deliveries found.")
+        return
+    for delivery in deliveries:
+        key = delivery_key(delivery["project_id"], int(delivery["number"]))
+        print(f"{key}  {delivery_label(delivery)}  {delivery.get('file_count', 0)} files  {human_size(delivery.get('package_size', 0))}")
+        for token, share in sorted(state.get("shares", {}).items(), key=lambda pair: pair[0]):
+            if share.get("delivery_id") != key:
+                continue
+            url = f"{args.base_url.rstrip('/')}/{delivery['project_id']}/{delivery['number']}/{quote(token, safe='')}"
+            print(f"  {share_status(share):8} {utc_label(share.get('expires_at'))}  {url}")
 
 
 def share_for_route(state: dict, token: str) -> dict | None:
@@ -559,6 +589,9 @@ def build_parser() -> argparse.ArgumentParser:
     reshare.add_argument("--base-url", default="https://files.navylily.tv")
     revoke = commands.add_parser("revoke", help="revoke a share token")
     revoke.add_argument("token")
+    list_parser = commands.add_parser("list", help="list deliveries and share links")
+    list_parser.add_argument("project", nargs="?", help="filter by project id")
+    list_parser.add_argument("--base-url", default="https://files.navylily.tv")
     preview = commands.add_parser("preview", help="generate or refresh a delivery's automatic link preview")
     preview.add_argument("project")
     preview.add_argument("delivery", type=int)
@@ -580,6 +613,8 @@ def main(argv: list[str] | None = None) -> int:
             reshare_command(args)
         elif args.command == "revoke":
             revoke_command(args)
+        elif args.command == "list":
+            list_command(args)
         elif args.command == "serve":
             serve_command(args)
         elif args.command == "preview":
